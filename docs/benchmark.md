@@ -22,6 +22,8 @@ The first command generates a seeded 10,000-message InfiniteBuild history, one m
 
 Artifacts are written to `artifacts/evaluation/no-cost/`: `report.md`, `report.html`, `runs.jsonl`, and `summary.json`. The report records configuration/result hashes, revision, environment, confidence intervals, successes, failures, zero live calls, and zero cost.
 
+The current checked-in `summary.json` identifies pushed commit `28e100a233c1428f0e1a78f99a56c66de8858dfd`, 10,000 messages, 43 probes, zero live calls, USD 0 cost, configuration hash `f4d5ebbb21ea84ac9072dce3d3be5d2af3c059ee2ea4fa511138e49a92f6622f`, result hash `58ec69f914138da8a5b8775d261c612b6891f0d1cfa7fc6255bcdd383464af65`, and file SHA-256 `58c619ca36bd17adc8d54beb6b41da3219dc06472ea148857a203d7d6d9bdfd4`. It is current deterministic fixture evidence, not a live-model or competitor result.
+
 ### Honest 15% gate diagnosis
 
 The checked-in full deterministic run does not meet the “15% relative accuracy over rolling summary” gate. Full Continuum reaches 100%, while rolling summary reaches about 92%, so the maximum possible relative lift is about 8.7%. Meeting 15% on those exact runs would require more than 105% accuracy. Flat/Continuum parity and five unchanged feature ablations further show that this small rule-backed fact set is saturated.
@@ -38,6 +40,10 @@ pnpm load:full
 Quick mode uses 10,000 events and 1,000 topics for CI. Full mode uses the migrated SQLite schema with 100,000 events, 10,000 topic pages, and five GiB of logical sparse attachment files plus source/attachment metadata. It measures insertion wall time, FTS search latency, timeline-page latency, database size, process RSS, integrity, and vector mode.
 
 The sparse corpus is not extraction/OCR/hash-throughput evidence. Bulk transactional insertion is not interactive ingestion latency. Results are machine-specific. Only a full 100,000-message result can populate the report’s local-search gate.
+
+The current full artifact, `artifacts/evaluation/load-full.json`, identifies pushed commit `28e100a233c1428f0e1a78f99a56c66de8858dfd` and was generated under Node 22.22.3 on an Apple M4 Pro. It records schema 18, 100,000 events, 10,000 topics, five GiB of logical sparse attachments, database integrity `ok`, native exact-cosine `sqlite-vec` v0.1.9, 3.6485064 ms final-size search p95, 0.1601724 ms timeline-page p95, and zero live calls. Its SHA-256 is `e9e8b593bfb008944913cd8894409841a65bd4e7f345535f03900d35266a045a`.
+
+The corroborating `artifacts/evaluation/load-quick.json` from the same commit records schema 18, 10,000 events, 1,000 topics, 0.5 GiB of logical sparse attachments, 0.5876352 ms search p95, and SHA-256 `2a0e3bbe3f21e7ec567c43d884f0bdc034ebc0d6e7614dddf3e0913e4c967be9`. Quick mode is CI-oriented and is not substituted for the full acceptance artifact.
 
 ## Public benchmark import
 

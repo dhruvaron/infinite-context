@@ -2,7 +2,7 @@
 
 Release verdict: **NOT ACCEPTED**.
 
-The current source schema is 18. With locked dependencies restored under Node 22, this hardening tree passed all-workspace typecheck, root lint, contract drift, conflict hygiene, 50 Vitest files with 470 tests, the production build, the native-ingestion smoke, the real macOS sandbox smoke, the static security audit, and all 26 executable Chromium/Firefox/WebKit journeys with 10 intentional browser-independent skips. Load and evaluation artifacts have not been regenerated. These are local current-tree results, not a frozen CI, fresh-checkout, live-provider, or competitor result. Recorded provider/API spend remains **USD 0.00**; no paid or normal-provider call was made.
+The current source schema is 18. With locked dependencies restored under Node 22, this hardening tree passed all-workspace typecheck, root lint, contract drift, conflict hygiene, 50 Vitest files with 470 tests, the production build, the native-ingestion smoke, the real macOS sandbox smoke, the static security audit, and all 26 executable Chromium/Firefox/WebKit journeys with 10 intentional browser-independent skips. Commit `28e100a233c1428f0e1a78f99a56c66de8858dfd` also produced current schema-18 full/quick load artifacts and the linked deterministic no-cost report. These are local current-tree results, not frozen CI, fresh-checkout, live-provider, or competitor evidence. Recorded provider/API spend remains **USD 0.00**; no paid or normal-provider call was made.
 
 ## Local release gates
 
@@ -38,13 +38,15 @@ The root Vitest configuration separates Node tests from jsdom web tests. Shared 
 - `pnpm test:native-ingestion`: passed with the real local Apple Vision/PDFKit helper available.
 - `pnpm test:macos-sandbox`: passed against the real macOS `sandbox-exec` backend for JavaScript/Python environment, filesystem, network, wall-time, output, and memory boundaries.
 - `pnpm test:e2e`: passed all **26 executable journeys** across Chromium, Firefox, and WebKit with **10 intentional skips** for five browser-independent backend scenarios repeated only in Chromium. The final WebKit product pass was rerun after stabilizing an engine-specific stale-paint assertion.
-- `pnpm load:full` and `pnpm eval:no-cost`: not regenerated on schema 18.
+- `pnpm load:full`: passed on schema 18 with 100,000 events, 10,000 topics, five GiB of logical sparse attachments, SQLite integrity `ok`, and native exact-cosine `sqlite-vec` v0.1.9. Final-size search p95 was 3.6485064 ms and timeline-page p95 was 0.1601724 ms on the recorded machine.
+- `pnpm load:quick`: passed on schema 18 with 10,000 events, 1,000 topics, 0.5 GiB of logical sparse attachments, and 0.5876352 ms search p95. The full profile, not quick mode, is the acceptance evidence.
+- `pnpm eval:no-cost`: regenerated the deterministic 10,000-message/43-probe report with zero live calls and USD 0 cost. Its configuration and result hashes are unchanged, and its 8.7% relative lift still misses the frozen 15% target.
 
 The Vitest result includes current local regression coverage for context-packet reconstruction, deletion and maintenance recovery, import exact-once behavior, schema-18 migration repair, embeddings and projection generation-token CAS, normalized confirmation proposals, browser bootstrap/settings/demo boundaries, and observability redaction. It does not replace fresh-checkout, frozen load, or live-provider evidence.
 
-## Historical predecessor-tree evidence
+## Evidence details and historical boundaries
 
-The exact results and hashes below are retained as historical evidence from an earlier uncommitted/pre-hardening tree. They are not schema-18 results and must be regenerated from a frozen schema-18 revision before they can represent the current implementation.
+Current schema-18 results below identify commit `28e100a233c1428f0e1a78f99a56c66de8858dfd` explicitly. Predecessor-only profiles and causal diagnostics retain their original historical or ineligible evidence class and are not silently promoted by the current load/no-cost regeneration.
 
 ### Browser and process journeys
 
@@ -91,8 +93,9 @@ The E2E supervisor is configured to use `.continuum/playwright`, a mock provider
 
 ### Long-session and evaluation evidence
 
-- `artifacts/evaluation/no-cost/summary.json`: exact seeded InfiniteBuild fixture with 10,000 messages, USD 0 recorded cost, configuration hash `f4d5ebbb21ea84ac9072dce3d3be5d2af3c059ee2ea4fa511138e49a92f6622f`, and result hash `58ec69f914138da8a5b8775d261c612b6891f0d1cfa7fc6255bcdd383464af65`. It still misses the frozen relative-accuracy gate: 8.7% versus 15%.
-- `artifacts/evaluation/load-full.json`: schema 11, native `sqlite-vec` v0.1.9 exact cosine mode, 100,000 events, 10,000 topics, integrity `ok`, 4.029 ms recorded local search p95, and 0.171 ms timeline-page p95. File SHA-256: `fc869b23bc2d55723a91d273414c98aae560dc0239c081a2360f8256e2ba8e4d`. Current source is schema 18, so this is historical storage/search evidence only: it proves neither current migration compatibility nor current integrity/performance, model recall, or interactive ingestion latency.
+- `artifacts/evaluation/no-cost/summary.json`: current commit `28e100a233c1428f0e1a78f99a56c66de8858dfd`, exact seeded InfiniteBuild fixture with 10,000 messages and 43 probes, zero live calls, USD 0 recorded cost, configuration hash `f4d5ebbb21ea84ac9072dce3d3be5d2af3c059ee2ea4fa511138e49a92f6622f`, result hash `58ec69f914138da8a5b8775d261c612b6891f0d1cfa7fc6255bcdd383464af65`, and file SHA-256 `58c619ca36bd17adc8d54beb6b41da3219dc06472ea148857a203d7d6d9bdfd4`. It still misses the frozen relative-accuracy gate: 8.7% versus 15%.
+- `artifacts/evaluation/load-full.json`: current commit `28e100a233c1428f0e1a78f99a56c66de8858dfd`, schema 18, 100,000 events, 10,000 topics, five GiB of logical sparse attachments, database integrity `ok`, and native `sqlite-vec` v0.1.9 exact cosine mode. The recorded Apple M4 Pro/Node 22.22.3 run measured 3.6485064 ms search p95 and 0.1601724 ms timeline-page p95 with zero live calls. File SHA-256: `e9e8b593bfb008944913cd8894409841a65bd4e7f345535f03900d35266a045a`. This is current local storage/search evidence, not model recall, extraction/OCR/hash throughput, interactive ingestion latency, live-provider latency, or cross-machine performance.
+- `artifacts/evaluation/load-quick.json`: corroborating schema-18 quick profile from the same commit with 10,000 events, 1,000 topics, 0.5 GiB of logical sparse attachments, 0.5876352 ms search p95, and file SHA-256 `2a0e3bbe3f21e7ec567c43d884f0bdc034ebc0d6e7614dddf3e0913e4c967be9`. It is not substituted for the full acceptance artifact.
 - Local ignored LongMemEval import (`.continuum/evaluation-imports/longmemeval-oracle/import-manifest.json`): all 500 oracle records, 10,960 messages, and 500 probes normalized from registry-verified MIT source bytes. Normalized SHA-256: `b75be49d51d2cd67901c80b687e66dfc863c759e83e0ef6a831f3c9fff32aab1`.
 - Local ignored bounded LongMemEval diagnostic (`.continuum/evaluation-diagnostics/longmemeval-oracle-bounded-no-cost/report.md`): one record/probe/repetition, four controlled modes, full plus six real production feature removals, zero live calls, USD 0. It is explicitly ineligible and is only production-path wiring evidence.
 - `artifacts/evaluation/causal/infinite-build-10k-diagnostic/causal-result.json`: complete exact InfiniteBuild 10k production-path diagnostic with 43 probes, four modes, full plus six real production feature-removal configurations, 172 controlled runs, 301 ablation runs, zero errors, and USD 0. Internal hashes: result `d6864864cdc6ce42ef884dc20fdd1527f9255b9f04e9fad6aa5a9fa156033026`, controlled runs `d822fc0fc09c32d0b5e9aa030fbc6cda66985a800171ade7c63597639f25f590`, ablation runs `d07b0c79b0381c9fa947c168e5dc9c822c892e6fe802ebe770be0cb55ded6803`, dataset `f66cd208fa74fedc7ae2d53babeb04f932a82960c8fec111d2d51a08aeedb042`, and generator `8fe1510bdd60342ee90f8d8f56da1d831e186b290bb45dca41d040f5e56f2422`.
@@ -145,7 +148,7 @@ Live OpenAI evaluation and manual black-box competitor operation never run autom
 
 The available suite source and historical results do not substitute for these current-revision, external, or release-bound records:
 
-- One complete single-revision run of all root gates after the schema-18 release revision is frozen, including regenerated 10k/100k artifacts. The 100k artifact must identify schema 18 rather than reusing the historical schema-11 result.
+- Preserve the complete single-revision root-gate record and current schema-18 10k/100k artifacts against the final implementation revision; rerun them if product code changes after commit `28e100a233c1428f0e1a78f99a56c66de8858dfd`.
 - Fresh-process restart evidence for bootstrap generation changes, import rollback/post-commit recovery, deletion cache non-resurrection, worker lease recovery, and exact idempotent response replay. Current local unit/integration fault injection is necessary but not sufficient for this record.
 - A future embedding-model transition workflow with a complete cost preview, resumable migration, and final corpus validation. Current schema 18 intentionally refuses the change once an embeddable corpus or embedding work exists.
 - A genuinely fresh macOS checkout startup and authenticated onboarding record, including real Keychain save/read/delete and proof that the key never reaches browser state, logs, SQLite, or exports.

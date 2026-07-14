@@ -1,9 +1,9 @@
 {
   "evidenceClass": "local-load-measurement",
   "profile": "quick",
-  "revision": "uncommitted workspace (HEAD unresolved)",
-  "startedAt": "2026-07-13T19:50:30.075Z",
-  "completedAt": "2026-07-13T19:50:30.468Z",
+  "revision": "28e100a233c1428f0e1a78f99a56c66de8858dfd",
+  "startedAt": "2026-07-14T19:11:08.340Z",
+  "completedAt": "2026-07-14T19:11:08.806Z",
   "liveApiCalls": 0,
   "environment": {
     "platform": "darwin",
@@ -12,7 +12,7 @@
     "cpuModel": "Apple M4 Pro",
     "cpuCount": 14,
     "totalMemoryBytes": 25769803776,
-    "freeMemoryBytesAtCompletion": 1008353280
+    "freeMemoryBytesAtCompletion": 613842944
   },
   "fixture": {
     "events": 10000,
@@ -23,29 +23,29 @@
     "attachmentRepresentation": "sparse files plus real source/attachment metadata; no parsing or content-hash verification"
   },
   "measurements": {
-    "insertFirst10kEventsMs": 168.234791,
+    "insertFirst10kEventsMs": 192.641042,
     "insertRemainingEventsMs": 0,
-    "insertTopicsMs": 55.915166,
-    "insertAttachmentMetadataMs": 0.27883299999996325,
+    "insertTopicsMs": 58.39916699999998,
+    "insertAttachmentMetadataMs": 0.30604099999999335,
     "searchAt10k": {
-      "medianMs": 0.19214549999995256,
-      "p95Ms": 0.43137289999997674,
-      "maximumMs": 0.9465000000000146
+      "medianMs": 0.24370849999996835,
+      "p95Ms": 0.5570791999999577,
+      "maximumMs": 2.621959000000004
     },
     "searchAtFinalSize": {
-      "medianMs": 0.21287550000002398,
-      "p95Ms": 0.44313154999998394,
-      "maximumMs": 1.7188750000000255
+      "medianMs": 0.27033349999999245,
+      "p95Ms": 0.5876352000000253,
+      "maximumMs": 2.869124999999997
     },
     "timelinePageAtFinalSize": {
-      "medianMs": 0.12831249999999272,
-      "p95Ms": 0.1367894000000035,
-      "maximumMs": 0.23908299999999372
+      "medianMs": 0.1354790000000321,
+      "p95Ms": 0.16462080000002852,
+      "maximumMs": 0.3222090000000435
     },
-    "databaseLogicalBytes": 8495104,
-    "databaseFileBytes": 8495104,
+    "databaseLogicalBytes": 8732672,
+    "databaseFileBytes": 8732672,
     "sparseAttachmentPhysicalBytes": 0,
-    "processResidentBytesAtCompletion": 116801536
+    "processResidentBytesAtCompletion": 119586816
   },
   "gates": {
     "searchP95Below500Ms": true,
@@ -53,9 +53,14 @@
   },
   "database": {
     "integrity": "ok",
-    "vectorAvailable": false,
-    "vectorMode": "bounded-cosine-fallback",
-    "schemaVersion": 4,
+    "integrityCheckedAt": "2026-07-14T19:11:08.805Z",
+    "vectorAvailable": true,
+    "vectorMode": "sqlite-vec",
+    "vectorStrategy": "native-exact-cosine",
+    "vectorVersion": "v0.1.9",
+    "vectorFallbackLimit": 5000,
+    "vectorLoadStatus": "ready",
+    "schemaVersion": 18,
     "journalMode": "wal"
   },
   "limitations": [

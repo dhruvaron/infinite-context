@@ -1,7 +1,7 @@
 # Continuum deterministic no-cost evaluation
 
-Generated: 2026-07-13T22:56:24.583Z<br>
-Revision: uncommitted workspace \(HEAD unresolved\)<br>
+Generated: 2026-07-14T19:10:20.079Z<br>
+Revision: 28e100a233c1428f0e1a78f99a56c66de8858dfd<br>
 Environment: darwin/arm64; Node v22.22.3<br>
 Configuration hash: `f4d5ebbb21ea84ac9072dce3d3be5d2af3c059ee2ea4fa511138e49a92f6622f`<br>
 Result hash: `58ec69f914138da8a5b8775d261c612b6891f0d1cfa7fc6255bcdd383464af65`<br>
@@ -50,7 +50,7 @@ Recorded API cost: $0.00
 - PASS: Unsupported personal memory (< 2%; actual 0.0%)
 - PASS: Prompt-token savings at 10k (>= 60%; actual 97.6%)
 - NOT MEASURED: Median latency overhead (<= 25% vs flat hybrid; actual not measured)
-- PASS: Local search p95 (< 500 ms at 100k messages; actual 4.0 ms)
+- PASS: Local search p95 (< 500 ms at 100k messages; actual 3.6 ms)
 - NOT MEASURED: First streamed token (<= 3,000 ms under normal provider conditions; actual not measured)
 - NOT MEASURED: Memory searchable after turn (<= 10,000 ms; actual not measured)
 
@@ -68,7 +68,7 @@ Recorded API cost: $0.00
 
 ## Performance measurements
 
-- Search p95: 4.03 ms
+- Search p95: 3.65 ms
 - First-token median: not measured
 - Memory-searchable p95: not measured
 - Eligibility notes: No latency/searchability artifact attached.

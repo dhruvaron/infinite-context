@@ -1,7 +1,7 @@
 {
   "evidenceClass": "no-cost-fixture",
-  "generatedAt": "2026-07-13T22:56:24.585Z",
-  "revision": "uncommitted workspace (HEAD unresolved)",
+  "generatedAt": "2026-07-14T19:10:20.081Z",
+  "revision": "28e100a233c1428f0e1a78f99a56c66de8858dfd",
   "environment": "darwin/arm64; Node v22.22.3",
   "liveApiCalls": 0,
   "recordedCostUsd": 0,
@@ -278,7 +278,7 @@
     {
       "name": "Local search p95",
       "target": "< 500 ms at 100k messages",
-      "actual": 4.0290831499996775,
+      "actual": 3.6485063999997687,
       "passed": true
     },
     {
@@ -297,9 +297,9 @@
   "attachedLoadReport": {
     "evidenceClass": "local-load-measurement",
     "profile": "full",
-    "revision": "uncommitted workspace (HEAD unresolved)",
-    "startedAt": "2026-07-13T22:56:09.929Z",
-    "completedAt": "2026-07-13T22:56:16.661Z",
+    "revision": "28e100a233c1428f0e1a78f99a56c66de8858dfd",
+    "startedAt": "2026-07-14T19:10:06.379Z",
+    "completedAt": "2026-07-14T19:10:12.668Z",
     "liveApiCalls": 0,
     "environment": {
       "platform": "darwin",
@@ -308,7 +308,7 @@
       "cpuModel": "Apple M4 Pro",
       "cpuCount": 14,
       "totalMemoryBytes": 25769803776,
-      "freeMemoryBytesAtCompletion": 294846464
+      "freeMemoryBytesAtCompletion": 321060864
     },
     "fixture": {
       "events": 100000,
@@ -319,29 +319,29 @@
       "attachmentRepresentation": "sparse files plus real source/attachment metadata; no parsing or content-hash verification"
     },
     "measurements": {
-      "insertFirst10kEventsMs": 203.97595900000002,
-      "insertRemainingEventsMs": 1917.347084,
-      "insertTopicsMs": 3806.8693329999996,
-      "insertAttachmentMetadataMs": 1.3805410000004485,
+      "insertFirst10kEventsMs": 193.786583,
+      "insertRemainingEventsMs": 1787.4186249999998,
+      "insertTopicsMs": 3543.4140829999997,
+      "insertAttachmentMetadataMs": 1.2052089999997406,
       "searchAt10k": {
-        "medianMs": 0.2367915000000096,
-        "p95Ms": 0.6257881499999707,
-        "maximumMs": 3.1473330000000033
+        "medianMs": 0.2528545000000406,
+        "p95Ms": 0.6528604000000164,
+        "maximumMs": 2.4620419999999967
       },
       "searchAtFinalSize": {
-        "medianMs": 0.9617499999994834,
-        "p95Ms": 4.0290831499996775,
-        "maximumMs": 29.423415999999634
+        "medianMs": 0.8582710000000588,
+        "p95Ms": 3.6485063999997687,
+        "maximumMs": 27.080124999999498
       },
       "timelinePageAtFinalSize": {
-        "medianMs": 0.14279099999976097,
-        "p95Ms": 0.1714539500007504,
-        "maximumMs": 0.44945800000004965
+        "medianMs": 0.14191649999975198,
+        "p95Ms": 0.1601723999999194,
+        "maximumMs": 0.5262079999993148
       },
-      "databaseLogicalBytes": 80461824,
-      "databaseFileBytes": 80461824,
+      "databaseLogicalBytes": 80764928,
+      "databaseFileBytes": 80764928,
       "sparseAttachmentPhysicalBytes": 0,
-      "processResidentBytesAtCompletion": 136740864
+      "processResidentBytesAtCompletion": 139001856
     },
     "gates": {
       "searchP95Below500Ms": true,
@@ -349,13 +349,14 @@
     },
     "database": {
       "integrity": "ok",
+      "integrityCheckedAt": "2026-07-14T19:10:12.665Z",
       "vectorAvailable": true,
       "vectorMode": "sqlite-vec",
       "vectorStrategy": "native-exact-cosine",
       "vectorVersion": "v0.1.9",
       "vectorFallbackLimit": 5000,
       "vectorLoadStatus": "ready",
-      "schemaVersion": 11,
+      "schemaVersion": 18,
       "journalMode": "wal"
     },
     "limitations": [
