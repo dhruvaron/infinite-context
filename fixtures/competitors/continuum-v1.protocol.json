@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "protocolId": "continuum-black-box-v1",
+  "protocolVersion": "1.0.0",
+  "title": "Single-session long-memory black-box capture protocol",
+  "startingState": "Begin in a new product conversation with no project files attached. Record the visible product, surface, date, and model setting. Paste the prepared benchmark turns in their published order without editing product responses.",
+  "interactionRules": [
+    "Use the same prepared user turns and checkpoints for every product capture.",
+    "Do not reveal expected answers in prompts or ask the product to self-grade.",
+    "Do not start a replacement conversation, invoke a handoff summary, or manually remind the product of prior facts.",
+    "Record visible errors, refusals, compaction notices, and retry actions verbatim.",
+    "Score only after the transcript is frozen and hashed."
+  ],
+  "stopRule": "Stop after the final prepared checkpoint probe or when the product prevents further turns; document whichever happens first.",
+  "scenarios": [
+    {
+      "id": "durable-fact-recall",
+      "title": "Recall an early durable fact after interference",
+      "checkpoint": 1000,
+      "promptPurpose": "Measure whether a fact established early in the same session remains answerable after unrelated turns."
+    },
+    {
+      "id": "decision-supersession",
+      "title": "Prefer a corrected decision over its obsolete value",
+      "checkpoint": 5000,
+      "promptPurpose": "Measure current-versus-historical resolution without restating either value in the probe."
+    },
+    {
+      "id": "cross-topic-multi-hop",
+      "title": "Connect evidence introduced under separate topics",
+      "checkpoint": 10000,
+      "promptPurpose": "Measure multi-hop recall at the end of a project-scale single session."
+    }
+  ]
+}

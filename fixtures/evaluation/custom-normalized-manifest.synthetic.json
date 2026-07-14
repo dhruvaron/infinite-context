@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "evidenceClass": "custom-normalized-evaluation-dataset",
+  "generatedAt": "2026-07-14T00:00:00.000Z",
+  "generator": "continuum-synthetic-normalized-smoke-v1",
+  "protocol": "synthetic-custom-smoke-v1",
+  "normalizedSha256": "5a04a9da6eb0ecefaef1a42510d6fb507654e33046c4e3e5838bd9250b54989b",
+  "records": 1,
+  "messages": 2,
+  "probes": 1
+}

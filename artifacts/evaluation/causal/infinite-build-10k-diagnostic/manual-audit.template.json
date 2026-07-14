@@ -1,0 +1,173 @@
+{
+  "schemaVersion": 2,
+  "evidenceClass": "human-manual-audit",
+  "runsHash": "2dcf8a6652e2984776889c358c5c208e82b2b6e51edf4db3996c09b2628e8700",
+  "selectionSeed": "continuum-causal-manual-audit-v2",
+  "selectionAlgorithm": "stratified-context-configuration-sha256-v2",
+  "reviewer": "replace-with-independent-human-reviewer",
+  "reviewedAt": null,
+  "runIds": [
+    "dc6ba1e56c8af11aed3e6d92193470bb62093d98d0c72f0066b7b96e06b5452a",
+    "73f13c30f00fbf7e0ccefd433433d9457189fbb3e11d5adfee31b6c3297f56f3",
+    "dee5eb73e76bfa9036552245023a18503db56385438738ef1785025809a512ff",
+    "c3d32367d67f9ad95593fa84f9a004af97835b1281e925801ad7aeaee7e0354f",
+    "caa8a8b635c2ce7829fd95c64733aed71dbe04ace8c3aa60db3e651c06273faa",
+    "a620ef0a6a95a1d875b28b621e0aad82016c22487877970c0f71aafee6e03609",
+    "d72c9d2120911b01569e57a7f2df48d070b241fc855b35f50224477d4ec5f974",
+    "a23ad03da24d92fc9c86b33ee4f76596c07c2d95c623cd9dba80a67fb982e1cb",
+    "79bf1738415beff0db0457270350c2602a66e37feff0adba96ffc3afe800040f",
+    "234b5de1b230eeb2160b6afb22357ea70fe3926d02dd0c13c31be364586cef51",
+    "c190b9fd76748f866f1dfc83bf1ee9fb34128ec3a5c8cf4c88b021ec208844c2",
+    "ff1099fdd36f3f4c6a52487bf65650e466b82a24d41a849d9ce44e52b578d182",
+    "b3aa9aa698a9642e035bffe01664008f1a56163019b1f0a6020d0c374ab0812f",
+    "f73bdc2301591f5f4809ee74f7dc92e46ecb87937d7b9b96a98a708768fe8524",
+    "7aef71223c98abaa85f519d9280567841024c9595bf1436f6aaf966fe88b96e8",
+    "51437d34486517dc55dc8f7c712c4eace91605f19d2e9177cfcfb62e6115691c",
+    "bf047424edf1f5f4e0cf1abbd140f5ec87d34f0ac0aa7f32d58a8269464ff979",
+    "44ae27cdd2ec1ec7e2d8f836427eb2241cbeecb7bbe810b40929a3e3a2a78d37",
+    "a5727b662788de2800aca076ff79622eb3b023cde53c67f19be077aed777e93e",
+    "3b2675ebe6180498723bd726c74eb60071f01f3a1e87f5978b72b6dc42063118"
+  ],
+  "reviews": [
+    {
+      "runId": "dc6ba1e56c8af11aed3e6d92193470bb62093d98d0c72f0066b7b96e06b5452a",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "73f13c30f00fbf7e0ccefd433433d9457189fbb3e11d5adfee31b6c3297f56f3",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "dee5eb73e76bfa9036552245023a18503db56385438738ef1785025809a512ff",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "c3d32367d67f9ad95593fa84f9a004af97835b1281e925801ad7aeaee7e0354f",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "caa8a8b635c2ce7829fd95c64733aed71dbe04ace8c3aa60db3e651c06273faa",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "a620ef0a6a95a1d875b28b621e0aad82016c22487877970c0f71aafee6e03609",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "d72c9d2120911b01569e57a7f2df48d070b241fc855b35f50224477d4ec5f974",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "a23ad03da24d92fc9c86b33ee4f76596c07c2d95c623cd9dba80a67fb982e1cb",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "79bf1738415beff0db0457270350c2602a66e37feff0adba96ffc3afe800040f",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "234b5de1b230eeb2160b6afb22357ea70fe3926d02dd0c13c31be364586cef51",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "c190b9fd76748f866f1dfc83bf1ee9fb34128ec3a5c8cf4c88b021ec208844c2",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "ff1099fdd36f3f4c6a52487bf65650e466b82a24d41a849d9ce44e52b578d182",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "b3aa9aa698a9642e035bffe01664008f1a56163019b1f0a6020d0c374ab0812f",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "f73bdc2301591f5f4809ee74f7dc92e46ecb87937d7b9b96a98a708768fe8524",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "7aef71223c98abaa85f519d9280567841024c9595bf1436f6aaf966fe88b96e8",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "51437d34486517dc55dc8f7c712c4eace91605f19d2e9177cfcfb62e6115691c",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "bf047424edf1f5f4e0cf1abbd140f5ec87d34f0ac0aa7f32d58a8269464ff979",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "44ae27cdd2ec1ec7e2d8f836427eb2241cbeecb7bbe810b40929a3e3a2a78d37",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "a5727b662788de2800aca076ff79622eb3b023cde53c67f19be077aed777e93e",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    },
+    {
+      "runId": "3b2675ebe6180498723bd726c74eb60071f01f3a1e87f5978b72b6dc42063118",
+      "answerCorrect": null,
+      "answerGrounded": null,
+      "contradictedEvidence": null,
+      "rationale": ""
+    }
+  ]
+}

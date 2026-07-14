@@ -1,0 +1,27 @@
+{
+  "name": "@continuum/evaluation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "evaluate": "node --import tsx src/cli.ts",
+    "import:dataset": "node --import tsx src/public-dataset-cli.ts",
+    "measure:latency": "node --import tsx src/latency-cli.ts",
+    "evaluate:live": "node --import tsx src/live-cli.ts",
+    "evaluate:causal": "node --import tsx src/causal-cli.ts",
+    "compare:competitors": "node --import tsx src/competitor-cli.ts"
+  },
+  "dependencies": {
+    "@continuum/config": "workspace:*",
+    "@continuum/contracts": "workspace:*",
+    "@continuum/memory": "workspace:*",
+    "@continuum/providers": "workspace:*",
+    "@continuum/retrieval": "workspace:*"
+  }
+}

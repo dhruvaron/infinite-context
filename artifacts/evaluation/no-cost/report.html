@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width">
+  <title>Continuum deterministic no-cost evaluation</title>
+  <style>body{font:16px system-ui;max-width:1100px;margin:40px auto;padding:0 20px;color:#182033}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccd2df;padding:8px;text-align:right}th:first-child,td:first-child{text-align:left}.pass{color:#087443}.miss{color:#b42318}.unknown{color:#6b7280}.notice{padding:14px;border:1px solid #d6a100;background:#fff8d8;border-radius:8px}code{overflow-wrap:anywhere}pre{overflow:auto;padding:12px;background:#f4f6fa;border-radius:8px}</style>
+</head>
+<body>
+  <h1>Continuum deterministic no-cost evaluation</h1>
+  <p>Generated 2026-07-13T22:56:24.583Z · Revision uncommitted workspace (HEAD unresolved) · Environment darwin/arm64; Node v22.22.3 · Config <code>f4d5ebbb21ea84ac9072dce3d3be5d2af3c059ee2ea4fa511138e49a92f6622f</code> · Result <code>58ec69f914138da8a5b8775d261c612b6891f0d1cfa7fc6255bcdd383464af65</code> · Cost $0.00</p>
+  <p class="notice">Evidence status: deterministic no-cost fixture. These results verify evaluator wiring, reproducibility, baseline isolation, and report generation. They are not live-model benchmark evidence and cannot establish the product&#039;s accuracy, latency, or token-savings claims.</p>
+  <h2>Configuration</h2>
+  <pre><code>{
+  &quot;evaluationClass&quot;: &quot;deterministic-no-cost-fixture&quot;,
+  &quot;dataset&quot;: &quot;InfiniteBuild&quot;,
+  &quot;datasetVersion&quot;: &quot;1.0.0&quot;,
+  &quot;generatorHash&quot;: &quot;8fe1510bdd60342ee90f8d8f56da1d831e186b290bb45dca41d040f5e56f2422&quot;,
+  &quot;seed&quot;: 20260713,
+  &quot;messages&quot;: 10000,
+  &quot;checkpoints&quot;: [
+    100,
+    1000,
+    5000,
+    10000
+  ],
+  &quot;responseProvider&quot;: &quot;deterministic rule fixture; no model&quot;,
+  &quot;repetitions&quot;: 1,
+  &quot;stochastic&quot;: false,
+  &quot;inputBudgetPerProbe&quot;: 4096,
+  &quot;outputBudgetPerProbe&quot;: 256
+}</code></pre>
+  <h2>Answer accuracy</h2>
+  <svg role="img" aria-label="Answer accuracy by mode" viewBox="0 0 640 250" xmlns="http://www.w3.org/2000/svg"><line x1="30" y1="215" x2="620" y2="215" stroke="#777"/><rect x="45" y="131" width="90" height="84" fill="#4f7cff"/><text x="90" y="235" text-anchor="middle" font-size="12">recent_window</text><text x="90" y="125" text-anchor="middle" font-size="12">46.6%</text><rect x="190" y="49" width="90" height="166" fill="#4f7cff"/><text x="235" y="235" text-anchor="middle" font-size="12">rolling_summary</text><text x="235" y="43" text-anchor="middle" font-size="12">92.0%</text><rect x="335" y="35" width="90" height="180" fill="#4f7cff"/><text x="380" y="235" text-anchor="middle" font-size="12">flat_hybrid</text><text x="380" y="29" text-anchor="middle" font-size="12">100.0%</text><rect x="480" y="35" width="90" height="180" fill="#4f7cff"/><text x="525" y="235" text-anchor="middle" font-size="12">continuum</text><text x="525" y="29" text-anchor="middle" font-size="12">100.0%</text></svg>
+  <h2>Controlled results</h2>
+  <table><thead><tr><th>Mode</th><th>Accuracy</th><th>Accuracy 95% CI</th><th>Recall@10</th><th>Temporal</th><th>Tokens</th><th>Cost</th><th>Median latency</th></tr></thead><tbody><tr><td>recent_window</td><td>46.6%</td><td>33.9%–59.3%</td><td>15.9%</td><td>25.8%</td><td>171563</td><td>$0.00</td><td>0 ms</td></tr><tr><td>rolling_summary</td><td>92.0%</td><td>84.3%–99.6%</td><td>15.9%</td><td>90.3%</td><td>140807</td><td>$0.00</td><td>0 ms</td></tr><tr><td>flat_hybrid</td><td>100.0%</td><td>100.0%–100.0%</td><td>100.0%</td><td>100.0%</td><td>109804</td><td>$0.00</td><td>0 ms</td></tr><tr><td>continuum</td><td>100.0%</td><td>100.0%–100.0%</td><td>100.0%</td><td>100.0%</td><td>110785</td><td>$0.00</td><td>0 ms</td></tr></tbody></table>
+  <h2>Diagnostic checks (not release evidence)</h2>
+  <ul><li class="miss">MISS: Accuracy over rolling summary — &gt;= 15% relative; actual 8.7%</li><li class="pass">PASS: Retrieval Recall@10 — &gt;= 90%; actual 100.0%</li><li class="pass">PASS: Current/superseded accuracy — &gt;= 90%; actual 100.0%</li><li class="pass">PASS: Unsupported personal memory — &lt; 2%; actual 0.0%</li><li class="pass">PASS: Prompt-token savings at 10k — &gt;= 60%; actual 97.6%</li><li class="unknown">NOT MEASURED: Median latency overhead — &lt;= 25% vs flat hybrid; actual not measured</li><li class="pass">PASS: Local search p95 — &lt; 500 ms at 100k messages; actual 4.0 ms</li><li class="unknown">NOT MEASURED: First streamed token — &lt;= 3,000 ms under normal provider conditions; actual not measured</li><li class="unknown">NOT MEASURED: Memory searchable after turn — &lt;= 10,000 ms; actual not measured</li></ul>
+  <h2>Component ablations</h2>
+  <table><thead><tr><th>Configuration</th><th>Disabled</th><th>Accuracy</th><th>Recall@10</th><th>Temporal</th><th>Tokens</th></tr></thead><tbody><tr><td>Full deterministic Continuum fixture</td><td>none</td><td>100.0%</td><td>100.0%</td><td>100.0%</td><td>110519</td></tr><tr><td>Without lexical retrieval</td><td>lexical</td><td>98.2%</td><td>98.8%</td><td>100.0%</td><td>108631</td></tr><tr><td>Without vector-like semantic concepts</td><td>vector</td><td>100.0%</td><td>100.0%</td><td>100.0%</td><td>110586</td></tr><tr><td>Without deterministic reranking</td><td>reranking</td><td>100.0%</td><td>100.0%</td><td>100.0%</td><td>110519</td></tr><tr><td>Without temporal policy</td><td>temporal</td><td>100.0%</td><td>100.0%</td><td>100.0%</td><td>110367</td></tr><tr><td>Without durable topic-page signal</td><td>topicPages</td><td>100.0%</td><td>100.0%</td><td>100.0%</td><td>110519</td></tr><tr><td>Without graph relation expansion</td><td>graph</td><td>100.0%</td><td>100.0%</td><td>100.0%</td><td>109690</td></tr></tbody></table>
+  <h2>Performance measurements</h2>
+  <ul><li>Search p95: 4.03 ms</li><li>First-token median: not measured</li><li>Memory-searchable p95: not measured</li><li>Eligibility notes: No latency/searchability artifact attached.</li><li>Source: load=artifacts/evaluation/load-full.json; latency=not attached</li></ul>
+  <h2>Diagnostic interpretation</h2>
+  <section><h3>15% relative accuracy gate feasibility</h3><p><strong>Status: BLOCKED</strong></p><p>The deterministic Continuum fixture is already at 100% while rolling summary is 92.0%. A 15% relative lift would require 105.8% accuracy, which is impossible. Flat/Continuum parity and 5 unchanged ablations show that this small rule-backed fact set is saturated; it cannot substantiate the release effect-size claim.</p><pre><code>{
+  &quot;targetRelativeImprovement&quot;: 0.15,
+  &quot;actualRelativeImprovement&quot;: 0.08745247148288973,
+  &quot;rollingAccuracy&quot;: 0.9195804195804196,
+  &quot;continuumAccuracy&quot;: 1,
+  &quot;requiredContinuumAccuracy&quot;: 1.0575174825174825,
+  &quot;maximumPossibleRelativeImprovement&quot;: 0.08745247148288973,
+  &quot;mathematicallyReachableOnThisRun&quot;: false,
+  &quot;continuumAtCeiling&quot;: true,
+  &quot;flatContinuumParity&quot;: true,
+  &quot;unchangedAblations&quot;: [
+    &quot;Without vector-like semantic concepts&quot;,
+    &quot;Without deterministic reranking&quot;,
+    &quot;Without temporal policy&quot;,
+    &quot;Without durable topic-page signal&quot;,
+    &quot;Without graph relation expansion&quot;
+  ],
+  &quot;rollingMisses&quot;: [
+    {
+      &quot;datasetId&quot;: &quot;infinite-build-8fe1510bdd60&quot;,
+      &quot;probeId&quot;: &quot;ib-1000-alice-language&quot;,
+      &quot;checkpoint&quot;: 1000,
+      &quot;answer&quot;: &quot;I don&#039;t know.&quot;,
+      &quot;score&quot;: 0.08333333333333337
+    },
+    {
+      &quot;datasetId&quot;: &quot;infinite-build-8fe1510bdd60&quot;,
+      &quot;probeId&quot;: &quot;ib-5000-alice-language&quot;,
+      &quot;checkpoint&quot;: 5000,
+      &quot;answer&quot;: &quot;I don&#039;t know.&quot;,
+      &quot;score&quot;: 0.08333333333333337
+    },
+    {
+      &quot;datasetId&quot;: &quot;infinite-build-8fe1510bdd60&quot;,
+      &quot;probeId&quot;: &quot;ib-10000-alice-language&quot;,
+      &quot;checkpoint&quot;: 10000,
+      &quot;answer&quot;: &quot;I don&#039;t know.&quot;,
+      &quot;score&quot;: 0.08333333333333337
+    },
+    {
+      &quot;datasetId&quot;: &quot;infinite-build-8fe1510bdd60&quot;,
+      &quot;probeId&quot;: &quot;ib-10000-bounded-graph&quot;,
+      &quot;checkpoint&quot;: 10000,
+      &quot;answer&quot;: &quot;I don&#039;t know.&quot;,
+      &quot;score&quot;: 0.21153846153846156
+    }
+  ],
+  &quot;conclusion&quot;: &quot;fixture-saturated&quot;,
+  &quot;explanation&quot;: &quot;The deterministic Continuum fixture is already at 100% while rolling summary is 92.0%. A 15% relative lift would require 105.8% accuracy, which is impossible. Flat/Continuum parity and 5 unchanged ablations show that this small rule-backed fact set is saturated; it cannot substantiate the release effect-size claim.&quot;
+}</code></pre></section>
+  <h2>Black-box comparison</h2>
+  <p>Visible behavior only; internal systems are uncontrolled.</p>
+  <p>No black-box competitor runs recorded.</p>
+  <h2>Representative successes</h2>
+  <ul><li>ib-100-alice-language: selected 10 evidence item(s) and produced &quot;Rust&quot;</li><li>ib-100-codename: selected 2 evidence item(s) and produced &quot;Northstar&quot;</li><li>ib-100-codename-return: selected 10 evidence item(s) and produced &quot;Northstar&quot;</li><li>ib-100-db-current: selected 4 evidence item(s) and produced &quot;PostgreSQL replaced MongoDB.&quot;</li><li>ib-100-db-original: selected 4 evidence item(s) and produced &quot;MongoDB&quot;</li><li>ib-100-launch: selected 10 evidence item(s) and produced &quot;The launch month is unresolved between September and October.&quot;</li><li>ib-100-pet: selected 0 evidence item(s) and produced &quot;I don&#039;t know; no retained evidence provides a pet&#039;s name.&quot;</li><li>ib-100-quote: selected 3 evidence item(s) and produced &quot;One timeline, no context tax.&quot;</li></ul>
+  <h2>Representative failures</h2>
+  <ul><li>recent_window/ib-1000-alice-language: answer was &quot;I don&#039;t know.&quot;</li><li>recent_window/ib-1000-codename: answer was &quot;I don&#039;t know; no codename evidence was selected.&quot;</li><li>recent_window/ib-1000-codename-return: answer was &quot;I don&#039;t know; no codename evidence was selected.&quot;</li><li>recent_window/ib-1000-db-current: answer was &quot;I don&#039;t know.&quot;</li><li>recent_window/ib-1000-db-original: answer was &quot;I don&#039;t know.&quot;</li><li>recent_window/ib-1000-quote: answer was &quot;I don&#039;t know the exact wording.&quot;</li><li>recent_window/ib-1000-theme: answer was &quot;I don&#039;t know.&quot;</li><li>recent_window/ib-5000-alice-language: answer was &quot;I don&#039;t know.&quot;</li></ul>
+  <h2>Limitations</h2>
+  <ul><li>No OpenAI, ChatGPT, Codex, embedding, reranking, or judge call was made.</li><li>Answers and semantic concepts come from deterministic rules. Accuracy values validate evaluation wiring and fixture sensitivity, not general model quality.</li><li>Latency values in answer runs are fixture placeholders. Only an attached full local-load report may contribute a measured 100k SQLite search p95.</li><li>Ablations disable deterministic fixture signals and do not prove the effect size of production lexical, vector, temporal, wiki, reranking, or graph components.</li><li>Public LongMemEval/HaluMem inputs and black-box competitor runs are not included in this no-cost command.</li><li>Live controlled evaluation, three stochastic repetitions, first-token latency, and post-turn memory-searchability remain required before release claims can be made.</li></ul>
+</body>
+</html>

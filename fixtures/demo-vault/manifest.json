@@ -1,0 +1,16 @@
+{
+  "format": "continuum-demo-vault",
+  "version": "1.0.0",
+  "license": "MIT",
+  "synthetic": true,
+  "liveApiCalls": 0,
+  "immutable": true,
+  "requiredDemonstrations": [
+    "verbatim retained event",
+    "source-linked topic page",
+    "current and superseded claim",
+    "unresolved contradiction",
+    "retrieval trace and context budget",
+    "focused knowledge graph"
+  ]
+}

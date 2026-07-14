@@ -1,0 +1,25 @@
+[
+  {
+    "question_id": "continuum-synthetic-single-session-user-001",
+    "question_type": "single-session-user",
+    "question": "Which tea did the synthetic user ask us to remember?",
+    "answer": "jasmine tea",
+    "question_date": "2026/01/02 (Fri) 10:00",
+    "haystack_session_ids": ["synthetic-session-001"],
+    "haystack_dates": ["2026/01/01 (Thu) 09:00"],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "This is synthetic adapter-test data. Please remember that I prefer jasmine tea.",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "Understood; for this synthetic example, your preference is jasmine tea."
+        }
+      ]
+    ],
+    "answer_session_ids": ["synthetic-session-001"]
+  }
+]

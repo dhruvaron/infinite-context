@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "evidenceClass": "local-mock-diagnostic",
+  "generatedAt": "2026-07-13T20:36:38.304Z",
+  "runtime": {
+    "apiOrigin": "http://127.0.0.1:4317",
+    "version": "0.1.0",
+    "mockProvider": true,
+    "providerReachable": true,
+    "vectorMode": "bounded-cosine-fallback"
+  },
+  "protocol": {
+    "samplesRequested": 1,
+    "quality": "fast",
+    "firstTokenStart": "immediately-before-message-post",
+    "searchableStart": "run-completed",
+    "searchableObjectTypes": [
+      "claim",
+      "topic"
+    ],
+    "pollIntervalMs": 250,
+    "searchTimeoutMs": 3000
+  },
+  "normalProviderConditionsAttested": false,
+  "eligibility": {
+    "firstTokenReleaseGate": false,
+    "postTurnSearchabilityReleaseGate": false,
+    "reasons": [
+      "Mock-provider timings are local diagnostics, not normal-provider release evidence.",
+      "Normal provider conditions were not explicitly attested."
+    ]
+  },
+  "budget": {
+    "before": {
+      "spentUsd": 0,
+      "hardLimitUsd": 100,
+      "reservedUsd": 0
+    },
+    "after": {
+      "spentUsd": 0,
+      "hardLimitUsd": 100,
+      "reservedUsd": 0
+    },
+    "recordedDeltaUsd": 0,
+    "capAtOrBelow100": true
+  },
+  "firstToken": {
+    "samples": 1,
+    "measured": 1,
+    "medianMs": 11.319707999999991,
+    "p95Ms": 11.319707999999991,
+    "minimumMs": 11.319707999999991,
+    "maximumMs": 11.319707999999991
+  },
+  "responseComplete": {
+    "samples": 1,
+    "measured": 1,
+    "medianMs": 11.350082999999998,
+    "p95Ms": 11.350082999999998,
+    "minimumMs": 11.350082999999998,
+    "maximumMs": 11.350082999999998
+  },
+  "postTurnSearchability": {
+    "samples": 1,
+    "measured": 1,
+    "medianMs": 254.12008299999997,
+    "p95Ms": 254.12008299999997,
+    "minimumMs": 254.12008299999997,
+    "maximumMs": 254.12008299999997
+  },
+  "messageToSearchability": {
+    "samples": 1,
+    "measured": 1,
+    "medianMs": 265.54054099999996,
+    "p95Ms": 265.54054099999996,
+    "minimumMs": 265.54054099999996,
+    "maximumMs": 265.54054099999996
+  },
+  "samples": [
+    {
+      "sample": 1,
+      "marker": "continuum_latency_1_050a71b16ae340dbb1b26c8bb3f609dc",
+      "markerSha256": "c6472abb8d4d3f68f1e1156711b082386bba6aab4e597649eda6582c53a92275",
+      "runId": "019f5d32-3015-74be-bcc5-fb5944e1cd3d",
+      "userEventId": "019f5d32-3015-74be-bcc5-f0774932cbd2",
+      "assistantEventId": "019f5d32-301c-7242-a9c2-c57d0d6d5c17",
+      "firstTokenMs": 11.319707999999991,
+      "responseCompleteMs": 11.350082999999998,
+      "postTurnSearchabilityMs": 254.12008299999997,
+      "messageToSearchabilityMs": 265.54054099999996,
+      "searchAttempts": 2,
+      "finalSearchServerMs": 0.9212499999994179,
+      "compiledSearchResultType": "topic",
+      "budgetBeforeUsd": 0,
+      "budgetAfterUsd": 0,
+      "recordedCostDeltaUsd": 0,
+      "error": null
+    }
+  ],
+  "limitations": [
+    "The marker is a synthetic calibration fact written into the measured vault; use an isolated evaluation data directory.",
+    "Searchability requires a derived claim or topic. A raw timeline event match does not count.",
+    "This harness measures the complete local API path, retrieval, provider stream, asynchronous memory compilation, and search polling; it does not isolate network latency.",
+    "The harness records application-ledger deltas but never stores the session token or provider credential."
+  ]
+}

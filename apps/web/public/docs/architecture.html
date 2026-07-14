@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Continuum architecture</title>
+    <style>
+      :root { color-scheme: light dark; font: 16px/1.65 Inter, ui-sans-serif, system-ui, sans-serif; background: #f5f3ee; color: #1b2420; }
+      body { margin: 0; }
+      main { width: min(760px, calc(100% - 32px)); margin: 0 auto; padding: 56px 0 90px; }
+      h1 { margin: 0; font-size: clamp(2rem, 7vw, 3.6rem); line-height: 1.05; letter-spacing: -.055em; }
+      h2 { margin: 2.5rem 0 .6rem; font-size: 1.25rem; letter-spacing: -.025em; }
+      p, li { color: #66716b; }
+      .kicker { color: #2c6750; font-size: .76rem; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
+      .lead { max-width: 680px; font-size: 1.12rem; }
+      .card { margin-top: 1.4rem; padding: 1rem 1.1rem; border: 1px solid #dcddd7; border-radius: 14px; background: #fbfaf7; }
+      .flow { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin: 1.5rem 0; }
+      .flow span { padding: .72rem; border-radius: 10px; background: #e6efe9; color: #194735; font-size: .78rem; text-align: center; }
+      code { padding: .12rem .3rem; border-radius: 5px; background: #efeee8; }
+      a { color: #2c6750; }
+      @media (max-width: 620px) { .flow { grid-template-columns: 1fr; } main { padding-top: 32px; } }
+      @media (prefers-color-scheme: dark) {
+        :root { background: #151a18; color: #e8ece9; }
+        p, li { color: #a1aaa5; }
+        .card { border-color: #343c38; background: #1c2220; }
+        .flow span { background: #23372e; color: #b9d9c8; }
+        code { background: #262c2a; }
+        a, .kicker { color: #77ad91; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="kicker">Continuum v1 · local-first architecture</p>
+      <h1>One timeline. Finite model context. Durable local memory.</h1>
+      <p class="lead">Continuum does not make a model context window literally infinite. It keeps the conversation addressable on this Mac, compiles inspectable memory, and selects a bounded evidence packet for each response.</p>
+
+      <div class="flow" aria-label="Message processing flow">
+        <span>Retain exact event</span><span>Retrieve evidence</span><span>Assemble packet</span><span>Stream answer</span><span>Compile memory</span>
+      </div>
+
+      <h2>Source of truth</h2>
+      <p>Verbatim conversation events and original attachment bytes remain authoritative. Claims, topic pages, embeddings, and graph edges are rebuildable projections. A compiled statement should always lead back to supporting evidence.</p>
+
+      <h2>Retrieval</h2>
+      <p>Each turn combines recent conversation, full-text and vector candidates, graph neighbors, temporal relevance, explicit pins, and user-authored pages. A recorded retrieval trace explains what was selected, excluded, and budgeted.</p>
+
+      <h2>Local and cloud boundary</h2>
+      <div class="card">
+        <strong>Kept on this Mac</strong>
+        <p>The complete timeline, wiki, graph, indexes, attachments, operational metadata, backups, and provider key reference remain local. The provider key itself is held in macOS Keychain.</p>
+        <strong>Sent for a cloud response</strong>
+        <p>The current request, a bounded set of recent turns, selected evidence, and tool instructions are sent to the configured provider with provider storage disabled.</p>
+      </div>
+
+      <h2>Integrity and recovery</h2>
+      <ul>
+        <li>Mutations are idempotent and destructive actions calculate their cascade first.</li>
+        <li>Attachments are content-addressed and must finish extraction before a message references them.</li>
+        <li>Managed backups and portable, checksummed exports support recovery.</li>
+        <li>User-authored topic revisions are trusted and are not silently overwritten.</li>
+      </ul>
+
+      <h2>Future coding-agent boundary</h2>
+      <p>V1 can authorize read-only workspace roots, but it cannot modify repositories. Future coding scopes can add sandboxed tools, branches, and multi-agent work while preserving the same event, provenance, and revision model.</p>
+
+      <p><a href="/">Return to Continuum</a></p>
+    </main>
+  </body>
+</html>

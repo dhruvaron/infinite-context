@@ -1,0 +1,109 @@
+name: Continuum CI
+
+on:
+  push:
+    branches: [main, "codex/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: continuum-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "true"
+  CONTINUUM_LIVE_TESTS: "false"
+  CONTINUUM_MOCK_PROVIDER: "true"
+
+jobs:
+  quality:
+    name: Linux quality and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm hygiene:conflicts
+      - run: pnpm typecheck
+      - run: pnpm contracts:check
+      - run: pnpm test
+      - run: pnpm test:native-ingestion
+      - run: pnpm build
+      - run: pnpm audit:security
+
+  browser:
+    name: Chrome, Firefox, and Safari-engine mock journeys
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install chromium firefox webkit
+      - run: pnpm test:e2e
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  deterministic-evidence:
+    name: No-cost evaluator and quick local load
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm load:quick
+      - run: pnpm eval:no-cost
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deterministic-no-cost-evidence
+          path: artifacts/evaluation/
+          if-no-files-found: error
+          retention-days: 30
+
+  macos-smoke:
+    name: macOS Node 22 smoke
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm contracts:check
+      - run: pnpm test
+      - run: pnpm test:native-ingestion
+      - run: pnpm test:macos-sandbox
+      - run: pnpm build

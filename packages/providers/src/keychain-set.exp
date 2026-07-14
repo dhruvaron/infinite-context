@@ -1,0 +1,41 @@
+#!/usr/bin/expect -f
+
+# Read the secret before starting the PTY. `log_user 0` prevents the prompt or
+# typed value from being copied to this helper's stdout/stderr. Service and
+# account are non-secret fixed identifiers supplied by the TypeScript wrapper.
+set timeout 15
+log_user 0
+match_max 4096
+
+if {$argc != 2} { exit 2 }
+set service [lindex $argv 0]
+set account [lindex $argv 1]
+if {![regexp {^[A-Za-z0-9._-]{1,200}$} $service] || ![regexp {^[A-Za-z0-9._-]{1,200}$} $account]} { exit 2 }
+# Read one byte beyond the application contract so oversized/direct input is
+# rejected without an unbounded `gets` allocation. The wrapper writes exactly
+# one LF and closes the pipe.
+set payload [read stdin 302]
+if {[string length $payload] < 2 || [string length $payload] > 301 || [string index $payload end] ne "\n"} { exit 2 }
+set secret [string range $payload 0 end-1]
+unset payload
+if {[string length $secret] < 19 || [string length $secret] > 300 || ![regexp {^sk-[A-Za-z0-9_-]+$} $secret]} { exit 2 }
+
+spawn -noecho /usr/bin/security add-generic-password -U -s $service -a $account -w
+set prompts 0
+expect {
+  -re {(?:password data|retype password) for new item:[ ]*$} {
+    incr prompts
+    if {$prompts > 2} { exit 2 }
+    send -- "$secret\r"
+    exp_continue
+  }
+  eof {
+    set result [wait]
+    unset secret
+    exit [lindex $result 3]
+  }
+  timeout {
+    unset secret
+    exit 124
+  }
+}

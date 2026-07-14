@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "hardCapUsd": 100,
+  "allocationsUsd": {
+    "development": 25,
+    "final_evaluation": 60,
+    "contingency": 15
+  },
+  "createdAt": "2026-07-13T23:40:55.694Z",
+  "updatedAt": "2026-07-13T23:40:55.694Z",
+  "breached": false,
+  "entries": []
+}

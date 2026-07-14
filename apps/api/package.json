@@ -1,0 +1,35 @@
+{
+  "name": "@continuum/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@continuum/config": "workspace:*",
+    "@continuum/contracts": "workspace:*",
+    "@continuum/database": "workspace:*",
+    "@continuum/ingestion": "workspace:*",
+    "@continuum/observability": "workspace:*",
+    "@continuum/providers": "workspace:*",
+    "@continuum/retrieval": "workspace:*",
+    "@continuum/tools": "workspace:*",
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/cors": "^11.0.1",
+    "@fastify/helmet": "^13.0.1",
+    "@fastify/multipart": "^9.2.1",
+    "@fastify/rate-limit": "^10.3.0",
+    "@fastify/static": "^8.2.0",
+    "fastify": "^5.4.0",
+    "jszip": "^3.10.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.15",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}

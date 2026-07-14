@@ -1,0 +1,72 @@
+{
+  "evidenceClass": "local-load-measurement",
+  "profile": "full",
+  "revision": "uncommitted workspace (HEAD unresolved)",
+  "startedAt": "2026-07-13T22:56:09.929Z",
+  "completedAt": "2026-07-13T22:56:16.661Z",
+  "liveApiCalls": 0,
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "node": "v22.22.3",
+    "cpuModel": "Apple M4 Pro",
+    "cpuCount": 14,
+    "totalMemoryBytes": 25769803776,
+    "freeMemoryBytesAtCompletion": 294846464
+  },
+  "fixture": {
+    "events": 100000,
+    "topics": 10000,
+    "attachmentFiles": 205,
+    "attachmentLogicalBytes": 5368709120,
+    "attachmentLogicalGiB": 5,
+    "attachmentRepresentation": "sparse files plus real source/attachment metadata; no parsing or content-hash verification"
+  },
+  "measurements": {
+    "insertFirst10kEventsMs": 203.97595900000002,
+    "insertRemainingEventsMs": 1917.347084,
+    "insertTopicsMs": 3806.8693329999996,
+    "insertAttachmentMetadataMs": 1.3805410000004485,
+    "searchAt10k": {
+      "medianMs": 0.2367915000000096,
+      "p95Ms": 0.6257881499999707,
+      "maximumMs": 3.1473330000000033
+    },
+    "searchAtFinalSize": {
+      "medianMs": 0.9617499999994834,
+      "p95Ms": 4.0290831499996775,
+      "maximumMs": 29.423415999999634
+    },
+    "timelinePageAtFinalSize": {
+      "medianMs": 0.14279099999976097,
+      "p95Ms": 0.1714539500007504,
+      "maximumMs": 0.44945800000004965
+    },
+    "databaseLogicalBytes": 80461824,
+    "databaseFileBytes": 80461824,
+    "sparseAttachmentPhysicalBytes": 0,
+    "processResidentBytesAtCompletion": 136740864
+  },
+  "gates": {
+    "searchP95Below500Ms": true,
+    "databaseIntegrityOk": true
+  },
+  "database": {
+    "integrity": "ok",
+    "vectorAvailable": true,
+    "vectorMode": "sqlite-vec",
+    "vectorStrategy": "native-exact-cosine",
+    "vectorVersion": "v0.1.9",
+    "vectorFallbackLimit": 5000,
+    "vectorLoadStatus": "ready",
+    "schemaVersion": 11,
+    "journalMode": "wal"
+  },
+  "limitations": [
+    "This is local storage/search evidence, not a model-quality benchmark.",
+    "Attachments are sparse logical files with metadata; extraction, OCR, hashing throughput, and five GiB of allocated physical disk are not measured.",
+    "Bulk fixture insertion uses transactions and does not represent interactive per-turn ingestion latency.",
+    "Results are machine-specific and must be regenerated on the release machine and macOS CI."
+  ],
+  "retainedDatabasePath": null
+}

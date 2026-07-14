@@ -1,0 +1,26 @@
+{
+  "name": "@continuum/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/worker.ts",
+    "start": "tsx src/worker.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@continuum/config": "workspace:*",
+    "@continuum/contracts": "workspace:*",
+    "@continuum/database": "workspace:*",
+    "@continuum/ingestion": "workspace:*",
+    "@continuum/memory": "workspace:*",
+    "@continuum/observability": "workspace:*",
+    "@continuum/providers": "workspace:*",
+    "zod-to-json-schema": "^3.24.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.15",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}

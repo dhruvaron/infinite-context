@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "fixtures": [
+    {
+      "file": "longmemeval.synthetic.sample.json",
+      "formatTarget": "LongMemEval",
+      "origin": "Continuum-authored synthetic data",
+      "containsUpstreamRecords": false,
+      "redistributable": true,
+      "sha256": "0dbeb36c3ca581f5e3cd3aad22a12c30fe69ec5179dd182d2b7b38cd56055f1b"
+    },
+    {
+      "file": "halumem.synthetic.sample.jsonl",
+      "formatTarget": "HaluMem",
+      "origin": "Continuum-authored synthetic data",
+      "containsUpstreamRecords": false,
+      "redistributable": true,
+      "sha256": "63fb308ce352317e12877fdf90b2c8d71d953c2bb6d3c7f695419a2200abaccc"
+    },
+    {
+      "file": "normalized.synthetic.sample.jsonl",
+      "formatTarget": "Continuum normalized evaluation JSONL",
+      "origin": "Continuum-authored synthetic data",
+      "containsUpstreamRecords": false,
+      "redistributable": true,
+      "sha256": "1c90855975209908dcb1337722cd2a7f80cc60329677595ac9fdd4a173ec06d4"
+    }
+  ]
+}

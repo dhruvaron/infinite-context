@@ -1,0 +1,370 @@
+{
+  "evidenceClass": "no-cost-fixture",
+  "generatedAt": "2026-07-13T22:56:24.585Z",
+  "revision": "uncommitted workspace (HEAD unresolved)",
+  "environment": "darwin/arm64; Node v22.22.3",
+  "liveApiCalls": 0,
+  "recordedCostUsd": 0,
+  "config": {
+    "evaluationClass": "deterministic-no-cost-fixture",
+    "dataset": "InfiniteBuild",
+    "datasetVersion": "1.0.0",
+    "generatorHash": "8fe1510bdd60342ee90f8d8f56da1d831e186b290bb45dca41d040f5e56f2422",
+    "seed": 20260713,
+    "messages": 10000,
+    "checkpoints": [
+      100,
+      1000,
+      5000,
+      10000
+    ],
+    "responseProvider": "deterministic rule fixture; no model",
+    "repetitions": 1,
+    "stochastic": false,
+    "inputBudgetPerProbe": 4096,
+    "outputBudgetPerProbe": 256
+  },
+  "configHash": "f4d5ebbb21ea84ac9072dce3d3be5d2af3c059ee2ea4fa511138e49a92f6622f",
+  "resultHash": "58ec69f914138da8a5b8775d261c612b6891f0d1cfa7fc6255bcdd383464af65",
+  "dataset": {
+    "id": "infinite-build-8fe1510bdd60",
+    "version": "1.0.0",
+    "generatorHash": "8fe1510bdd60342ee90f8d8f56da1d831e186b290bb45dca41d040f5e56f2422",
+    "messages": 10000,
+    "probes": 43,
+    "checkpoints": [
+      100,
+      1000,
+      5000,
+      10000
+    ]
+  },
+  "metrics": [
+    {
+      "mode": "recent_window",
+      "runs": 44,
+      "answerAccuracy": 0.4661603493125232,
+      "retrievalPrecisionAt10": 0.012121212121212121,
+      "retrievalRecallAt10": 0.1590909090909091,
+      "ndcgAt10": 0.03508571157163694,
+      "temporalAccuracy": 0.25806451612903225,
+      "unsupportedMemoryRate": 0,
+      "contradictionRate": 0,
+      "cumulativeInputTokens": 171563,
+      "cumulativeAllTokens": 171872,
+      "cumulativeCostUsd": 0,
+      "medianResponseLatencyMs": 0,
+      "p95RetrievalLatencyMs": 0,
+      "accuracyConfidence95": [
+        0.3390640735717936,
+        0.5932566250532528
+      ]
+    },
+    {
+      "mode": "rolling_summary",
+      "runs": 44,
+      "answerAccuracy": 0.9195804195804196,
+      "retrievalPrecisionAt10": 0.012121212121212121,
+      "retrievalRecallAt10": 0.1590909090909091,
+      "ndcgAt10": 0.03508571157163694,
+      "temporalAccuracy": 0.9032258064516129,
+      "unsupportedMemoryRate": 0,
+      "contradictionRate": 0,
+      "cumulativeInputTokens": 140807,
+      "cumulativeAllTokens": 141078,
+      "cumulativeCostUsd": 0,
+      "medianResponseLatencyMs": 0,
+      "p95RetrievalLatencyMs": 0,
+      "accuracyConfidence95": [
+        0.8434036919536506,
+        0.9957571472071886
+      ]
+    },
+    {
+      "mode": "flat_hybrid",
+      "runs": 44,
+      "answerAccuracy": 1,
+      "retrievalPrecisionAt10": 0.4162698412698411,
+      "retrievalRecallAt10": 1,
+      "ndcgAt10": 0.8336786719030023,
+      "temporalAccuracy": 1,
+      "unsupportedMemoryRate": 0,
+      "contradictionRate": 0,
+      "cumulativeInputTokens": 109804,
+      "cumulativeAllTokens": 110097,
+      "cumulativeCostUsd": 0,
+      "medianResponseLatencyMs": 0,
+      "p95RetrievalLatencyMs": 0,
+      "accuracyConfidence95": [
+        1,
+        1
+      ]
+    },
+    {
+      "mode": "continuum",
+      "runs": 44,
+      "answerAccuracy": 1,
+      "retrievalPrecisionAt10": 0.3845959595959594,
+      "retrievalRecallAt10": 1,
+      "ndcgAt10": 0.9645909325059425,
+      "temporalAccuracy": 1,
+      "unsupportedMemoryRate": 0,
+      "contradictionRate": 0,
+      "cumulativeInputTokens": 110785,
+      "cumulativeAllTokens": 111078,
+      "cumulativeCostUsd": 0,
+      "medianResponseLatencyMs": 0,
+      "p95RetrievalLatencyMs": 0,
+      "accuracyConfidence95": [
+        1,
+        1
+      ]
+    }
+  ],
+  "ablations": [
+    {
+      "name": "Full deterministic Continuum fixture",
+      "disabledFeature": null,
+      "answerAccuracy": 1,
+      "retrievalRecallAt10": 1,
+      "temporalAccuracy": 1,
+      "cumulativeInputTokens": 110519,
+      "runs": 43
+    },
+    {
+      "name": "Without lexical retrieval",
+      "disabledFeature": "lexical",
+      "answerAccuracy": 0.9816636851520572,
+      "retrievalRecallAt10": 0.9883720930232558,
+      "temporalAccuracy": 1,
+      "cumulativeInputTokens": 108631,
+      "runs": 43
+    },
+    {
+      "name": "Without vector-like semantic concepts",
+      "disabledFeature": "vector",
+      "answerAccuracy": 1,
+      "retrievalRecallAt10": 1,
+      "temporalAccuracy": 1,
+      "cumulativeInputTokens": 110586,
+      "runs": 43
+    },
+    {
+      "name": "Without deterministic reranking",
+      "disabledFeature": "reranking",
+      "answerAccuracy": 1,
+      "retrievalRecallAt10": 1,
+      "temporalAccuracy": 1,
+      "cumulativeInputTokens": 110519,
+      "runs": 43
+    },
+    {
+      "name": "Without temporal policy",
+      "disabledFeature": "temporal",
+      "answerAccuracy": 1,
+      "retrievalRecallAt10": 1,
+      "temporalAccuracy": 1,
+      "cumulativeInputTokens": 110367,
+      "runs": 43
+    },
+    {
+      "name": "Without durable topic-page signal",
+      "disabledFeature": "topicPages",
+      "answerAccuracy": 1,
+      "retrievalRecallAt10": 1,
+      "temporalAccuracy": 1,
+      "cumulativeInputTokens": 110519,
+      "runs": 43
+    },
+    {
+      "name": "Without graph relation expansion",
+      "disabledFeature": "graph",
+      "answerAccuracy": 1,
+      "retrievalRecallAt10": 1,
+      "temporalAccuracy": 1,
+      "cumulativeInputTokens": 109690,
+      "runs": 43
+    }
+  ],
+  "diagnostics": {
+    "accuracyGate": {
+      "targetRelativeImprovement": 0.15,
+      "actualRelativeImprovement": 0.08745247148288973,
+      "rollingAccuracy": 0.9195804195804196,
+      "continuumAccuracy": 1,
+      "requiredContinuumAccuracy": 1.0575174825174825,
+      "maximumPossibleRelativeImprovement": 0.08745247148288973,
+      "mathematicallyReachableOnThisRun": false,
+      "continuumAtCeiling": true,
+      "flatContinuumParity": true,
+      "unchangedAblations": [
+        "Without vector-like semantic concepts",
+        "Without deterministic reranking",
+        "Without temporal policy",
+        "Without durable topic-page signal",
+        "Without graph relation expansion"
+      ],
+      "rollingMisses": [
+        {
+          "datasetId": "infinite-build-8fe1510bdd60",
+          "probeId": "ib-1000-alice-language",
+          "checkpoint": 1000,
+          "answer": "I don't know.",
+          "score": 0.08333333333333337
+        },
+        {
+          "datasetId": "infinite-build-8fe1510bdd60",
+          "probeId": "ib-5000-alice-language",
+          "checkpoint": 5000,
+          "answer": "I don't know.",
+          "score": 0.08333333333333337
+        },
+        {
+          "datasetId": "infinite-build-8fe1510bdd60",
+          "probeId": "ib-10000-alice-language",
+          "checkpoint": 10000,
+          "answer": "I don't know.",
+          "score": 0.08333333333333337
+        },
+        {
+          "datasetId": "infinite-build-8fe1510bdd60",
+          "probeId": "ib-10000-bounded-graph",
+          "checkpoint": 10000,
+          "answer": "I don't know.",
+          "score": 0.21153846153846156
+        }
+      ],
+      "conclusion": "fixture-saturated",
+      "explanation": "The deterministic Continuum fixture is already at 100% while rolling summary is 92.0%. A 15% relative lift would require 105.8% accuracy, which is impossible. Flat/Continuum parity and 5 unchanged ablations show that this small rule-backed fact set is saturated; it cannot substantiate the release effect-size claim."
+    }
+  },
+  "diagnosticGates": [
+    {
+      "name": "Accuracy over rolling summary",
+      "target": ">= 15% relative",
+      "actual": 0.08745247148288973,
+      "passed": false
+    },
+    {
+      "name": "Retrieval Recall@10",
+      "target": ">= 90%",
+      "actual": 1,
+      "passed": true
+    },
+    {
+      "name": "Current/superseded accuracy",
+      "target": ">= 90%",
+      "actual": 1,
+      "passed": true
+    },
+    {
+      "name": "Unsupported personal memory",
+      "target": "< 2%",
+      "actual": 0,
+      "passed": true
+    },
+    {
+      "name": "Prompt-token savings at 10k",
+      "target": ">= 60%",
+      "actual": 0.9759490763455361,
+      "passed": true
+    },
+    {
+      "name": "Median latency overhead",
+      "target": "<= 25% vs flat hybrid",
+      "actual": null,
+      "passed": false
+    },
+    {
+      "name": "Local search p95",
+      "target": "< 500 ms at 100k messages",
+      "actual": 4.0290831499996775,
+      "passed": true
+    },
+    {
+      "name": "First streamed token",
+      "target": "<= 3,000 ms under normal provider conditions",
+      "actual": null,
+      "passed": false
+    },
+    {
+      "name": "Memory searchable after turn",
+      "target": "<= 10,000 ms",
+      "actual": null,
+      "passed": false
+    }
+  ],
+  "attachedLoadReport": {
+    "evidenceClass": "local-load-measurement",
+    "profile": "full",
+    "revision": "uncommitted workspace (HEAD unresolved)",
+    "startedAt": "2026-07-13T22:56:09.929Z",
+    "completedAt": "2026-07-13T22:56:16.661Z",
+    "liveApiCalls": 0,
+    "environment": {
+      "platform": "darwin",
+      "architecture": "arm64",
+      "node": "v22.22.3",
+      "cpuModel": "Apple M4 Pro",
+      "cpuCount": 14,
+      "totalMemoryBytes": 25769803776,
+      "freeMemoryBytesAtCompletion": 294846464
+    },
+    "fixture": {
+      "events": 100000,
+      "topics": 10000,
+      "attachmentFiles": 205,
+      "attachmentLogicalBytes": 5368709120,
+      "attachmentLogicalGiB": 5,
+      "attachmentRepresentation": "sparse files plus real source/attachment metadata; no parsing or content-hash verification"
+    },
+    "measurements": {
+      "insertFirst10kEventsMs": 203.97595900000002,
+      "insertRemainingEventsMs": 1917.347084,
+      "insertTopicsMs": 3806.8693329999996,
+      "insertAttachmentMetadataMs": 1.3805410000004485,
+      "searchAt10k": {
+        "medianMs": 0.2367915000000096,
+        "p95Ms": 0.6257881499999707,
+        "maximumMs": 3.1473330000000033
+      },
+      "searchAtFinalSize": {
+        "medianMs": 0.9617499999994834,
+        "p95Ms": 4.0290831499996775,
+        "maximumMs": 29.423415999999634
+      },
+      "timelinePageAtFinalSize": {
+        "medianMs": 0.14279099999976097,
+        "p95Ms": 0.1714539500007504,
+        "maximumMs": 0.44945800000004965
+      },
+      "databaseLogicalBytes": 80461824,
+      "databaseFileBytes": 80461824,
+      "sparseAttachmentPhysicalBytes": 0,
+      "processResidentBytesAtCompletion": 136740864
+    },
+    "gates": {
+      "searchP95Below500Ms": true,
+      "databaseIntegrityOk": true
+    },
+    "database": {
+      "integrity": "ok",
+      "vectorAvailable": true,
+      "vectorMode": "sqlite-vec",
+      "vectorStrategy": "native-exact-cosine",
+      "vectorVersion": "v0.1.9",
+      "vectorFallbackLimit": 5000,
+      "vectorLoadStatus": "ready",
+      "schemaVersion": 11,
+      "journalMode": "wal"
+    },
+    "limitations": [
+      "This is local storage/search evidence, not a model-quality benchmark.",
+      "Attachments are sparse logical files with metadata; extraction, OCR, hashing throughput, and five GiB of allocated physical disk are not measured.",
+      "Bulk fixture insertion uses transactions and does not represent interactive per-turn ingestion latency.",
+      "Results are machine-specific and must be regenerated on the release machine and macOS CI."
+    ],
+    "retainedDatabasePath": null
+  },
+  "attachedLatencyReport": null
+}

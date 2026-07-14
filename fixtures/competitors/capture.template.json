@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "status": "template",
+  "captureId": "replace-with-unique-capture-id",
+  "product": "ChatGPT",
+  "capturedAt": "2026-01-01T00:00:00.000Z",
+  "productSurface": "replace-with-visible-surface",
+  "visibleModelSetting": "replace-with-exact-visible-setting-or-unknown",
+  "protocolPath": "continuum-v1.protocol.json",
+  "transcript": {
+    "path": "replace-with-manually-supplied-transcript.txt",
+    "sha256": null,
+    "handling": "manual-export",
+    "redactions": "none"
+  },
+  "scores": [
+    {
+      "scenarioId": "durable-fact-recall",
+      "checkpoint": 1000,
+      "turnLocator": "replace-with-transcript-turn-or-line-locator",
+      "metrics": {
+        "answerAccuracy": null,
+        "memoryRecall": null,
+        "temporalCorrectness": null,
+        "unsupportedMemoryResistance": null
+      },
+      "evaluator": "replace-with-human-evaluator",
+      "rationale": "replace-with-evidence-based-human-rationale"
+    },
+    {
+      "scenarioId": "decision-supersession",
+      "checkpoint": 5000,
+      "turnLocator": "replace-with-transcript-turn-or-line-locator-or-not-reached",
+      "metrics": {
+        "answerAccuracy": null,
+        "memoryRecall": null,
+        "temporalCorrectness": null,
+        "unsupportedMemoryResistance": null
+      },
+      "evaluator": "replace-with-human-evaluator",
+      "rationale": "replace-with-evidence-based-rationale-or-why-this-checkpoint-was-not-reached"
+    },
+    {
+      "scenarioId": "cross-topic-multi-hop",
+      "checkpoint": 10000,
+      "turnLocator": "replace-with-transcript-turn-or-line-locator-or-not-reached",
+      "metrics": {
+        "answerAccuracy": null,
+        "memoryRecall": null,
+        "temporalCorrectness": null,
+        "unsupportedMemoryResistance": null
+      },
+      "evaluator": "replace-with-human-evaluator",
+      "rationale": "replace-with-evidence-based-rationale-or-why-this-checkpoint-was-not-reached"
+    }
+  ],
+  "attestation": {
+    "capturedManually": false,
+    "noAutomatedProductInteraction": false,
+    "transcriptUneditedExceptDeclaredRedactions": false,
+    "internalPromptsAndRetrievalUnobserved": false,
+    "attestedBy": "replace-with-attester"
+  },
+  "notes": "Template only. This file contains no observed product result."
+}
