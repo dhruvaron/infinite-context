@@ -30,7 +30,7 @@ export function searchResultIdentity(result: SearchResult): string {
   return `${result.type}:${result.id}:${result.topicRevisionId ?? result.evidenceId ?? ""}`;
 }
 
-export function SearchDialog({ open, demo = false, onClose, onSelect }: { open: boolean; demo?: boolean; onClose: () => void; onSelect: (result: SearchResult) => void }) {
+export function SearchDialog({ open, demo = false, disabled = false, onClose, onSelect }: { open: boolean; demo?: boolean; disabled?: boolean; onClose: () => void; onSelect: (result: SearchResult) => void }) {
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -43,9 +43,15 @@ export function SearchDialog({ open, demo = false, onClose, onSelect }: { open: 
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => { if (open) window.setTimeout(() => inputRef.current?.focus(), 40); }, [open]);
+  useEffect(() => { if (open && !disabled) window.setTimeout(() => inputRef.current?.focus(), 40); }, [disabled, open]);
   useEffect(() => {
-    if (!open) return;
+    if (!open || disabled) {
+      setResults([]);
+      setNextCursor(null);
+      setLoading(false);
+      setLoadingMore(false);
+      return;
+    }
     if (!query.trim()) { setResults([]); setNextCursor(null); setTookMs(0); setLoading(false); setError(null); return; }
     let cancelled = false;
     setError(null);
@@ -65,13 +71,13 @@ export function SearchDialog({ open, demo = false, onClose, onSelect }: { open: 
       }).finally(() => { if (!cancelled) setLoading(false); });
     }, 160);
     return () => { cancelled = true; window.clearTimeout(timeout); };
-  }, [demo, filters, open, query]);
+  }, [demo, disabled, filters, open, query]);
 
   const activeFilters = filters.types.length + Number(filters.role !== "all") + Number(filters.status !== "all") + Number(filters.date !== "all") + Number(Boolean(filters.source.trim())) + Number(Boolean(filters.tag.trim()));
   const resultSummary = useMemo(() => loading ? "Searching local memory…" : `${results.length} result${results.length === 1 ? "" : "s"}${tookMs ? ` in ${Math.round(tookMs)} ms` : ""}`, [loading, results.length, tookMs]);
 
   const loadMore = async () => {
-    if (!nextCursor || loading || loadingMore) return;
+    if (disabled || !nextCursor || loading || loadingMore) return;
     setLoadingMore(true);
     setError(null);
     try {

@@ -937,11 +937,11 @@ describe("hard deletion provenance and derived-state closure", () => {
       summary: "Parent", currentState: "", history: "", sourceIds: [evidence.id], authorType: "user", promptVersion: "v1"
     });
     const malicious = database.upsertTopicRevision({
-      type: "note", title: "User note", slug: "unrelated-user-note", markdown: "# User note\n\nMust survive.",
+      type: "artifact", title: "User note", slug: "unrelated-user-note", markdown: "# User note\n\nMust survive.",
       summary: "Independent", currentState: "", history: "", tags: [`parent:${parent.id}`], sourceIds: [evidence.id], authorType: "user", promptVersion: "v1"
     });
     const compilerChild = database.upsertTopicRevision({
-      type: "note", title: "Compiler child", slug: "compiler-linked-child", markdown: "# Compiler child",
+      type: "artifact", title: "Compiler child", slug: "compiler-linked-child", markdown: "# Compiler child",
       summary: "Compiler-owned", currentState: "", history: "", sourceIds: [evidence.id], authorType: "user", promptVersion: "v1"
     });
     const timestamp = new Date().toISOString();

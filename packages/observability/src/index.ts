@@ -58,6 +58,7 @@ export class LocalLogger {
   readonly #logDir: string;
   readonly #maximumFileBytes: number;
   #tracePrompts: boolean;
+  #promptTracingResolver: (() => boolean) | undefined;
   #pending: Promise<void> = Promise.resolve();
   #date = "";
   #fileIndex = 0;
@@ -72,8 +73,12 @@ export class LocalLogger {
     this.#tracePrompts = enabled;
   }
 
+  setPromptTracingResolver(resolver: (() => boolean) | undefined): void {
+    this.#promptTracingResolver = resolver;
+  }
+
   get promptTracingEnabled(): boolean {
-    return this.#tracePrompts;
+    return this.#promptTracingEnabledNow();
   }
 
   debug(message: string, fields: Fields = {}) { this.#enqueue("debug", message, fields); }
@@ -115,10 +120,14 @@ export class LocalLogger {
       const date = new Date();
       const day = date.toISOString().slice(0, 10);
       if (this.#date !== day) { this.#date = day; this.#fileIndex = 0; }
-      const safeFields = redactLogFields(fields, this.#tracePrompts);
-      const line = JSON.stringify({ timestamp: date.toISOString(), level, message, ...safeFields }) + "\n";
       let file = join(this.#logDir, `${day}-${process.pid}-${this.#fileIndex}.jsonl`);
       const info = await stat(file).catch(() => null);
+      // A response may finish long after the request started. Resolve durable
+      // consent after the asynchronous filesystem preparation and immediately
+      // before append, so another process can revoke prompt tracing while that
+      // response is still in flight.
+      const safeFields = redactLogFields(fields, this.#promptTracingEnabledNow());
+      const line = JSON.stringify({ timestamp: date.toISOString(), level, message, ...safeFields }) + "\n";
       if (info && info.size + Buffer.byteLength(line) > this.#maximumFileBytes) {
         this.#fileIndex += 1;
         file = join(this.#logDir, `${day}-${process.pid}-${this.#fileIndex}.jsonl`);
@@ -126,6 +135,17 @@ export class LocalLogger {
       await appendFile(file, line, { encoding: "utf8", mode: 0o600 });
     } catch {
       // Logging must never take down the local application.
+    }
+  }
+
+  #promptTracingEnabledNow(): boolean {
+    if (!this.#promptTracingResolver) return this.#tracePrompts;
+    try {
+      return this.#promptTracingResolver() === true;
+    } catch {
+      // A consent lookup failure is a privacy-sensitive failure. Keep the log,
+      // but redact prompt content until durable consent can be read again.
+      return false;
     }
   }
 }

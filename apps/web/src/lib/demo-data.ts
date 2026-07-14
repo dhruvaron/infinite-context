@@ -50,6 +50,7 @@ export const demoEvents: ConversationEvent[] = [
 ];
 
 export const demoBootstrap: BootstrapData = {
+  vaultBoundary: { generation: 0, maintenanceLocked: false, vaultId: null },
   runtime: {
     mode: "demo",
     apiReachable: false,
@@ -92,6 +93,7 @@ export const demoBootstrap: BootstrapData = {
   events: demoEvents,
   eventsNextCursor: null,
   activeRuns: [],
+  latestFailedRun: null,
   topics: [
     {
       id: DEMO_IDS.projectTopic,

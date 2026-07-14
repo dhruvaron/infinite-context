@@ -59,14 +59,54 @@ const RUN_STREAM_CHECKPOINT_PREFIX = "continuum.run-stream.";
 const IDLE_PROGRESS: StreamProgress = { runId: null, stage: "idle", label: "" };
 const ACCEPTED_TYPES = new Set(["text/plain", "text/markdown", "application/json", "text/csv", "application/pdf", "image/png", "image/jpeg", "image/webp", "text/javascript", "application/javascript", "text/typescript", "application/typescript", "text/css", "text/html", "text/x-python", "text/x-c", "text/x-c++", "text/x-java-source", "text/x-go", "text/x-rust", "text/x-shellscript", "text/yaml", "application/x-yaml"]);
 const INITIAL_BOOTSTRAP: BootstrapData = {
+  vaultBoundary: { generation: 0, maintenanceLocked: true, vaultId: null },
   runtime: { mode: "offline", apiReachable: false, providerReachable: false, vectorSearch: "unavailable", memoryQueue: "paused", message: "Connecting to the local Continuum service…" },
   settings: DEFAULT_SETTINGS,
   budget: { totalUsd: 0, reservedUsd: 0, allocatedUsd: 0, availableUsd: 100, activeReservations: 0, capUsd: 100, warningThresholdUsd: 20, inputTokens: 0, outputTokens: 0, extractionTokens: 0, embeddingTokens: 0, ledgerCreatedAt: null, warningThresholdsReached: [] },
-  events: [], eventsNextCursor: null, activeRuns: [], topics: [], claims: [], graph: { nodes: [], edges: [], focusId: null, truncated: false }, activeMemories: [], attention: [], memoryProposals: [],
+  events: [], eventsNextCursor: null, activeRuns: [], latestFailedRun: null, topics: [], claims: [], graph: { nodes: [], edges: [], focusId: null, truncated: false }, activeMemories: [], attention: [], memoryProposals: [],
   debug: { trace: null, contextPacket: null, modelCalls: [], toolCalls: [], jobs: [], promptVersion: "—", schemaVersion: "—", versions: { prompt: "—", schema: "—", retrieval: "—", reranker: "—", contextBuilder: "—", vector: "—", parser: "—", chunker: "—", responseModel: "—", embeddingModel: "—" } }
 };
 
+function freshDefaultSettings(): AppSettings {
+  return {
+    ...DEFAULT_SETTINGS,
+    responseModelIds: { ...DEFAULT_SETTINGS.responseModelIds }
+  };
+}
+
 type RunStreamCheckpoint = { cursor: string; assistantEventId: string | null; contentLength: number; checksum: number };
+
+type TrustedPersonalSnapshot = {
+  vaultBoundary: BootstrapData["vaultBoundary"];
+  events: ConversationEvent[];
+  eventsCursor: string | null;
+  topics: TopicPage[];
+  claims: BootstrapData["claims"];
+  graph: GraphResponse;
+  graphRequest: { hops: 1 | 2; includeHistory: boolean };
+  debugSnapshot: DebugSnapshot;
+  memoryProposals: TopicProposal[];
+  settings: AppSettings;
+  memories: MemoryReference[];
+  draft: string;
+  draftRevisionId: string | null;
+  attachments: PendingAttachment[];
+  progress: StreamProgress;
+  retryParentId: string | null;
+  drawer: "memory" | "graph" | null;
+  searchOpen: boolean;
+  topicDetail: TopicPageDetail | null;
+  topicEditor: TopicPage | null;
+  highlightedEventId: string | null;
+  revealedEventIds: Set<string>;
+  inspectorTab: "memory" | "debug";
+  selectedRunId: string | null;
+  tracesByRunId: Record<string, RetrievalTrace>;
+  referencesByRunId: Record<string, MemoryReference[]>;
+  debugByRunId: Record<string, DebugSnapshot>;
+  loadingTraceRunIds: Set<string>;
+  vaultRefreshFailed: boolean;
+};
 
 function readLocalStorage(key: string): string | null {
   try { return localStorage.getItem(key); } catch { return null; }
@@ -149,14 +189,13 @@ function clearAllRunStreamCheckpoints(): void {
 
 export function App() {
   const queryClient = useQueryClient();
-  const bootstrapQuery = useQuery({ queryKey: ["bootstrap"], queryFn: () => continuumApi.bootstrap() });
-  const budgetQuery = useQuery({ queryKey: ["budget"], queryFn: () => continuumApi.getBudgetSummary(), retry: false, refetchInterval: 15_000 });
+  const bootstrapQuery = useQuery({ queryKey: ["bootstrap"], queryFn: () => continuumApi.bootstrap(), retry: false });
   const data = bootstrapQuery.data ?? INITIAL_BOOTSTRAP;
   const [events, setEvents] = useState<ConversationEvent[]>(data.events);
   const [eventsCursor, setEventsCursor] = useState<string | null>(data.eventsNextCursor);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [topics, setTopics] = useState<TopicPage[]>(data.topics);
-  const [, setClaims] = useState(data.claims);
+  const [claims, setClaims] = useState(data.claims);
   const [graph, setGraph] = useState<GraphResponse>(data.graph);
   const [graphRequest, setGraphRequest] = useState<{ hops: 1 | 2; includeHistory: boolean }>({ hops: 1, includeHistory: false });
   const [debugSnapshot, setDebugSnapshot] = useState<DebugSnapshot>(data.debug);
@@ -166,6 +205,8 @@ export function App() {
   const [draft, setDraftState] = useState(() => readLocalStorage(DRAFT_KEY) ?? "");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [progress, setProgress] = useState<StreamProgress>(IDLE_PROGRESS);
+  const [retryParentId, setRetryParentId] = useState<string | null>(null);
+  const [vaultRefreshFailed, setVaultRefreshFailed] = useState(false);
   const [drawer, setDrawer] = useState<"memory" | "graph" | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -191,6 +232,7 @@ export function App() {
   const [mergeLoading, setMergeLoading] = useState(false);
   const [mergeError, setMergeError] = useState<string | null>(null);
   const [previewMode, setPreviewMode] = useState(false);
+  const [leavingPreview, setLeavingPreview] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<"memory" | "debug">("memory");
   const [selectedRunId, setSelectedRunId] = useState<string | null>(data.debug.trace?.runId ?? null);
   const [tracesByRunId, setTracesByRunId] = useState<Record<string, RetrievalTrace>>(() => data.debug.trace ? { [data.debug.trace.runId]: data.debug.trace } : {});
@@ -208,19 +250,60 @@ export function App() {
   const hydratedRealRef = useRef(false);
   const selectedRunIdRef = useRef<string | null>(data.debug.trace?.runId ?? null);
   const activeStreamRunIdsRef = useRef<Set<string>>(new Set());
+  const automaticStreamRunIdsRef = useRef<Set<string>>(new Set());
   const terminalStreamRunIdsRef = useRef<Set<string>>(new Set());
   const draftRevisionRef = useRef<string | null>(readLocalStorage(DRAFT_REVISION_KEY));
   const mutationRecoveryAttemptedRef = useRef<Set<string>>(new Set());
   const memoryPollRunIdsRef = useRef<Set<string>>(new Set());
   const vaultUiGenerationRef = useRef(0);
+  const deletionScrubActiveRef = useRef(false);
+  const trustedPersonalSnapshotRef = useRef<TrustedPersonalSnapshot | null>(null);
+  const skipNextCanonicalHydrationRef = useRef(false);
+  const previousVaultReadsDisabledRef = useRef(true);
+  const vaultReadsDisabledRef = useRef(true);
+
+  const setRetryParent = useCallback((eventId: string | null) => {
+    retryParentRef.current = eventId;
+    setRetryParentId(eventId);
+  }, []);
+
+  const applyRunRecovery = useCallback((snapshot: BootstrapData) => {
+    const activeRetryParent = snapshot.activeRuns.find((run) => run.userEventId)?.userEventId ?? null;
+    const failedRun = snapshot.latestFailedRun;
+    const failedRunHasCompletedAnswer = failedRun?.userEventId
+      ? snapshot.events.some((event) => event.role === "assistant" && event.parentEventId === failedRun.userEventId && event.status === "complete" && event.active)
+      : false;
+    if (activeRetryParent) {
+      setRetryParent(activeRetryParent);
+      return;
+    }
+    if (failedRun?.userEventId && !failedRunHasCompletedAnswer) {
+      setRetryParent(failedRun.userEventId);
+      setProgress((current) => current.runId === null && current.stage !== "idle" ? current : {
+        runId: failedRun.id,
+        stage: "failed",
+        label: failedRun.errorCode === "API_RESTARTED"
+          ? "The local service restarted before this response completed. Retry the saved request."
+          : "The last response failed. Retry the saved request."
+      });
+      return;
+    }
+    setRetryParent(null);
+    setProgress((current) => current.runId !== null ? IDLE_PROGRESS : current);
+  }, [setRetryParent]);
 
   useEffect(() => { selectedRunIdRef.current = selectedRunId; }, [selectedRunId]);
 
   useEffect(() => {
-    if (!bootstrapQuery.data || bootstrapQuery.isPlaceholderData || previewMode) return;
+    if (!previewMode && skipNextCanonicalHydrationRef.current) {
+      skipNextCanonicalHydrationRef.current = false;
+      return;
+    }
+    if (!bootstrapQuery.data || bootstrapQuery.isPlaceholderData || bootstrapQuery.isError || deletionScrubActiveRef.current || previewMode) return;
     const resolved = bootstrapQuery.data;
     const firstRealHydration = !hydratedRealRef.current;
     hydratedRealRef.current = true;
+    setVaultRefreshFailed(false);
     setEvents((current) => {
       if (firstRealHydration) return resolved.events;
       const liveAssistantIds = new Set(resolved.activeRuns
@@ -242,6 +325,7 @@ export function App() {
     setMemoryProposals(resolved.memoryProposals);
     setSettings(resolved.settings);
     setMemories(resolved.activeMemories);
+    applyRunRecovery(resolved);
     const trace = resolved.debug.trace;
     if (resolved.runtime.mode === "offline") {
       setTracesByRunId({});
@@ -263,7 +347,7 @@ export function App() {
     }
     const canOnboard = resolved.runtime.mode === "connected" || resolved.runtime.mode === "degraded";
     setOnboardingOpen(!resolved.settings.onboardingComplete && canOnboard);
-  }, [bootstrapQuery.data, bootstrapQuery.isPlaceholderData, previewMode]);
+  }, [applyRunRecovery, bootstrapQuery.data, bootstrapQuery.isError, bootstrapQuery.isPlaceholderData, previewMode]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -272,17 +356,6 @@ export function App() {
     media.addEventListener("change", apply);
     return () => media.removeEventListener("change", apply);
   }, [settings.theme]);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        if (!document.querySelector('[aria-modal="true"]')) setSearchOpen(true);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
 
   const addToast = useCallback((tone: ToastItem["tone"], title: string, message?: string) => {
     const id = crypto.randomUUID();
@@ -307,6 +380,9 @@ export function App() {
 
   const setDraft = (value: string) => {
     setDraftState(value);
+    // Preview input is intentionally ephemeral. The personal draft and its
+    // exact retry revision must survive a preview tab crash or reload.
+    if (previewMode) return;
     const revision = crypto.randomUUID();
     draftRevisionRef.current = revision;
     try {
@@ -317,9 +393,15 @@ export function App() {
     }
   };
 
-  const resetVaultScopedUiState = useCallback(() => {
+  const resetVaultScopedUiState = useCallback((options: { clearSettings?: boolean; requireCanonicalRefresh?: boolean; preserveBootstrap?: boolean } = {}) => {
+    const clearedSettings = options.clearSettings ? freshDefaultSettings() : null;
     vaultUiGenerationRef.current += 1;
     continuumApi.resetVaultReadScope();
+    if (clearedSettings) {
+      continuumApi.resetVaultSettingsCache();
+      setSettings(clearedSettings);
+    }
+    setVaultRefreshFailed(options.requireCanonicalRefresh !== false);
     void queryClient.cancelQueries({ queryKey: ["bootstrap"] });
     void queryClient.cancelQueries({ queryKey: ["budget"] });
     abortRef.current?.abort();
@@ -329,9 +411,10 @@ export function App() {
     clearAllMutationIntents();
     clearAllRunStreamCheckpoints();
     streamingEventRef.current = null;
-    retryParentRef.current = null;
+    setRetryParent(null);
     cancellationAcknowledgedRef.current = false;
     activeStreamRunIdsRef.current.clear();
+    automaticStreamRunIdsRef.current.clear();
     terminalStreamRunIdsRef.current.clear();
     memoryPollRunIdsRef.current.clear();
     mutationRecoveryAttemptedRef.current.clear();
@@ -384,7 +467,48 @@ export function App() {
     setMergeError(null);
     setPreviewMode(false);
     setOnboardingOpen(false);
-  }, [attachments, draft, queryClient]);
+    if (!options.preserveBootstrap) {
+      queryClient.setQueryData<BootstrapData | undefined>(["bootstrap"], (current) => current ? {
+        ...current,
+        events: [],
+        eventsNextCursor: null,
+        activeRuns: [],
+        latestFailedRun: null,
+        topics: [],
+        claims: [],
+        graph: { nodes: [], edges: [], focusId: null, truncated: false },
+        activeMemories: [],
+        attention: [],
+        memoryProposals: [],
+        debug: INITIAL_BOOTSTRAP.debug,
+        ...(clearedSettings ? { settings: clearedSettings } : {})
+      } : current);
+    }
+  }, [attachments, draft, queryClient, setRetryParent]);
+
+  const hydrateCanonicalVaultSnapshot = useCallback((next: BootstrapData) => {
+    const trace = next.debug.trace;
+    deletionScrubActiveRef.current = false;
+    hydratedRealRef.current = true;
+    setEvents(next.events);
+    setEventsCursor(next.eventsNextCursor);
+    setTopics(next.topics);
+    setClaims(next.claims);
+    setMemories(next.activeMemories);
+    setMemoryProposals(next.memoryProposals);
+    setGraph(next.graph);
+    setDebugSnapshot(next.debug);
+    setSettings(next.settings);
+    setTracesByRunId(trace ? { [trace.runId]: trace } : {});
+    setReferencesByRunId(trace ? { [trace.runId]: next.activeMemories } : {});
+    setDebugByRunId(trace ? { [trace.runId]: next.debug } : {});
+    selectedRunIdRef.current = trace?.runId ?? null;
+    setSelectedRunId(trace?.runId ?? null);
+    applyRunRecovery(next);
+    setVaultRefreshFailed(false);
+    const canOnboard = next.runtime.mode === "connected" || next.runtime.mode === "degraded";
+    setOnboardingOpen(!next.settings.onboardingComplete && canOnboard);
+  }, [applyRunRecovery]);
 
   const clearCommittedDraft = useCallback((intent: PersistedMessageIntent) => {
     if (readLocalStorage(DRAFT_REVISION_KEY) !== intent.draftRevisionId) return;
@@ -398,9 +522,59 @@ export function App() {
   }, []);
 
   const isDemo = previewMode || data.runtime.mode === "demo";
-  const runtime = previewMode ? { ...demoBootstrap.runtime, message: "Temporary immutable preview — your vault is unchanged" } : data.runtime;
+  const bootstrapReadFailed = bootstrapQuery.isError || vaultRefreshFailed;
+  const runtime: BootstrapData["runtime"] = previewMode
+    ? { ...demoBootstrap.runtime, message: "Temporary immutable preview — your vault is unchanged" }
+    : bootstrapReadFailed
+      ? {
+          ...data.runtime,
+          mode: "offline",
+          apiReachable: false,
+          providerReachable: false,
+          memoryQueue: "paused",
+          message: hydratedRealRef.current
+            ? "A core vault refresh failed. The last verified view is preserved read-only until every core read succeeds."
+            : "The local vault could not be loaded completely. Reconnect before using vault controls."
+        }
+      : data.runtime;
   const offline = runtime.mode === "offline";
+  const vaultReadsDisabled = offline && !isDemo;
+  vaultReadsDisabledRef.current = vaultReadsDisabled;
+  const budgetQuery = useQuery({
+    queryKey: ["budget"],
+    queryFn: () => continuumApi.getBudgetSummary(),
+    enabled: !vaultReadsDisabled && !previewMode,
+    retry: false,
+    refetchInterval: 15_000
+  });
   const currentBudget = previewMode ? demoBootstrap.budget : budgetQuery.data ?? data.budget;
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        if (!vaultReadsDisabled && !document.querySelector('[aria-modal="true"]')) setSearchOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [vaultReadsDisabled]);
+
+  useEffect(() => {
+    const wasDisabled = previousVaultReadsDisabledRef.current;
+    previousVaultReadsDisabledRef.current = vaultReadsDisabled;
+    if (!vaultReadsDisabled) return;
+    setSearchOpen(false);
+    setDrawer((current) => current === "graph" ? null : current);
+    if (!wasDisabled && !deletionScrubActiveRef.current) {
+      vaultUiGenerationRef.current += 1;
+      continuumApi.resetVaultReadScope();
+    }
+  }, [vaultReadsDisabled]);
+
+  useEffect(() => {
+    if (bootstrapReadFailed && !previewMode) setOnboardingOpen(false);
+  }, [bootstrapReadFailed, previewMode]);
 
   useEffect(() => {
     if (previewMode || offline) return;
@@ -413,6 +587,136 @@ export function App() {
     } catch { /* A visible toast is still safer than suppressing the warning. */ }
     addToast("warning", `$${latest} lifetime API-credit threshold reached`, `$${currentBudget.allocatedUsd.toFixed(2)} is spent or reserved for this installation; $${currentBudget.availableUsd.toFixed(2)} remains before the hard stop.`);
   }, [addToast, currentBudget.allocatedUsd, currentBudget.availableUsd, currentBudget.warningThresholdsReached, offline, previewMode]);
+
+  const enterDemoPreview = (personalSettings: AppSettings): void => {
+    trustedPersonalSnapshotRef.current = {
+      vaultBoundary: data.vaultBoundary,
+      events,
+      eventsCursor,
+      topics,
+      claims,
+      graph,
+      graphRequest,
+      debugSnapshot,
+      memoryProposals,
+      settings: personalSettings,
+      memories,
+      draft,
+      draftRevisionId: draftRevisionRef.current,
+      attachments,
+      progress,
+      retryParentId,
+      drawer,
+      searchOpen,
+      topicDetail,
+      topicEditor,
+      highlightedEventId,
+      revealedEventIds: new Set(revealedEventIds),
+      inspectorTab,
+      selectedRunId,
+      tracesByRunId,
+      referencesByRunId,
+      debugByRunId,
+      loadingTraceRunIds: new Set(loadingTraceRunIds),
+      vaultRefreshFailed
+    };
+    vaultUiGenerationRef.current += 1;
+    continuumApi.resetVaultReadScope();
+    abortRef.current?.abort();
+    abortRef.current = null;
+    streamingEventRef.current = null;
+    setRetryParent(null);
+    setProgress(IDLE_PROGRESS);
+    setDraftState("");
+    draftRevisionRef.current = null;
+    setAttachments([]);
+    setDrawer(null);
+    setSearchOpen(false);
+    setTopicDetail(null);
+    setTopicEditor(null);
+    setHighlightedEventId(null);
+    setRevealedEventIds(new Set());
+    setGraphRequest({ hops: 1, includeHistory: false });
+    setLoadingTraceRunIds(new Set());
+    const trace = demoBootstrap.debug.trace;
+    setPreviewMode(true);
+    setEvents(demoBootstrap.events);
+    setEventsCursor(null);
+    setTopics(demoBootstrap.topics);
+    setClaims(demoBootstrap.claims);
+    setMemories(demoBootstrap.activeMemories);
+    setMemoryProposals(demoBootstrap.memoryProposals);
+    setGraph(demoBootstrap.graph);
+    setDebugSnapshot(demoBootstrap.debug);
+    setSettings(demoBootstrap.settings);
+    setTracesByRunId(trace ? { [trace.runId]: trace } : {});
+    setReferencesByRunId(trace ? { [trace.runId]: demoBootstrap.activeMemories } : {});
+    setDebugByRunId(trace ? { [trace.runId]: demoBootstrap.debug } : {});
+    selectedRunIdRef.current = trace?.runId ?? null;
+    setSelectedRunId(trace?.runId ?? null);
+  };
+
+  const restoreTrustedPersonalSnapshot = (): boolean => {
+    const snapshot = trustedPersonalSnapshotRef.current;
+    if (!snapshot) return false;
+    trustedPersonalSnapshotRef.current = null;
+    vaultUiGenerationRef.current += 1;
+    continuumApi.resetVaultReadScope();
+    abortRef.current?.abort();
+    abortRef.current = null;
+    streamingEventRef.current = null;
+    for (const attachment of attachments) {
+      if (!snapshot.attachments.includes(attachment) && attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+    }
+    setEvents(snapshot.events);
+    setEventsCursor(snapshot.eventsCursor);
+    setTopics(snapshot.topics);
+    setClaims(snapshot.claims);
+    setGraph(snapshot.graph);
+    setGraphRequest(snapshot.graphRequest);
+    setDebugSnapshot(snapshot.debugSnapshot);
+    setMemoryProposals(snapshot.memoryProposals);
+    setSettings(snapshot.settings);
+    setMemories(snapshot.memories);
+    setDraftState(snapshot.draft);
+    draftRevisionRef.current = snapshot.draftRevisionId;
+    try {
+      if (snapshot.draft) localStorage.setItem(DRAFT_KEY, snapshot.draft); else localStorage.removeItem(DRAFT_KEY);
+      if (snapshot.draftRevisionId) localStorage.setItem(DRAFT_REVISION_KEY, snapshot.draftRevisionId); else localStorage.removeItem(DRAFT_REVISION_KEY);
+    } catch { /* The exact in-memory draft still survives this preview boundary. */ }
+    setAttachments(snapshot.attachments);
+    setProgress(snapshot.progress);
+    setRetryParent(snapshot.retryParentId);
+    setDrawer(snapshot.drawer);
+    setSearchOpen(snapshot.searchOpen);
+    setTopicDetail(snapshot.topicDetail);
+    setTopicEditor(snapshot.topicEditor);
+    setHighlightedEventId(snapshot.highlightedEventId);
+    setRevealedEventIds(new Set(snapshot.revealedEventIds));
+    setInspectorTab(snapshot.inspectorTab);
+    setTracesByRunId(snapshot.tracesByRunId);
+    setReferencesByRunId(snapshot.referencesByRunId);
+    setDebugByRunId(snapshot.debugByRunId);
+    setLoadingTraceRunIds(new Set(snapshot.loadingTraceRunIds));
+    selectedRunIdRef.current = snapshot.selectedRunId;
+    setSelectedRunId(snapshot.selectedRunId);
+    setVaultRefreshFailed(snapshot.vaultRefreshFailed);
+    setLoadingOlder(false);
+    setSettingsOpen(false);
+    setDeleteTarget(null);
+    setDeleteImpact(null);
+    setRevisionEventId(null);
+    setRevisions([]);
+    setEvidenceOpen(false);
+    setEvidenceRecord(null);
+    setMergeOpen(false);
+    setResetOpen(false);
+    setVaultImpact(null);
+    skipNextCanonicalHydrationRef.current = true;
+    setPreviewMode(false);
+    setOnboardingOpen(false);
+    return true;
+  };
 
   const loadRunTrace = useCallback(async (runId: string, openInspector = false) => {
     const generation = vaultUiGenerationRef.current;
@@ -439,12 +743,13 @@ export function App() {
       if (!source) return;
       const trace = { ...source, id: crypto.randomUUID(), runId };
       const references = demoBootstrap.activeMemories;
-      setTracesByRunId((current) => touchRunCache(current, runId, trace));
+      setTracesByRunId((current) => touchRunCache<RetrievalTrace>(current, runId, trace));
       setReferencesByRunId((current) => touchRunCache(current, runId, references));
-      setDebugByRunId((current) => touchRunCache(current, runId, { ...demoBootstrap.debug, trace, contextPacket: demoBootstrap.debug.contextPacket ? { ...demoBootstrap.debug.contextPacket, runId } : null, modelCalls: demoBootstrap.debug.modelCalls.map((call) => ({ ...call, runId })), toolCalls: demoBootstrap.debug.toolCalls.map((call) => ({ ...call, runId })) }));
+      setDebugByRunId((current) => touchRunCache<DebugSnapshot>(current, runId, { ...demoBootstrap.debug, trace, contextPacket: demoBootstrap.debug.contextPacket ? { ...demoBootstrap.debug.contextPacket, runId } : null, modelCalls: demoBootstrap.debug.modelCalls.map((call) => ({ ...call, runId })), toolCalls: demoBootstrap.debug.toolCalls.map((call) => ({ ...call, runId })) }));
       if (openInspector && selectedRunIdRef.current === runId) setMemories(references);
       return;
     }
+    if (vaultReadsDisabledRef.current) return;
     setLoadingTraceRunIds((current) => new Set(current).add(runId));
     try {
       const [debugResult, traceResult] = await Promise.allSettled([
@@ -458,7 +763,7 @@ export function App() {
       const references = traceToMemoryReferences(trace, memories);
       setTracesByRunId((current) => touchRunCache(current, runId, trace));
       setReferencesByRunId((current) => touchRunCache(current, runId, references));
-      if (runDebug) setDebugByRunId((current) => touchRunCache(current, runId, { ...runDebug, trace }));
+      if (runDebug) setDebugByRunId((current) => touchRunCache<DebugSnapshot>(current, runId, { ...runDebug, trace }));
       if (debugResult.status === "rejected" && openInspector) addToast("warning", "Some answer diagnostics are unavailable", debugResult.reason instanceof Error ? debugResult.reason.message : "The exact context packet and tool calls could not be loaded.");
       if (openInspector && selectedRunIdRef.current === runId) setMemories(references);
     } catch (error) {
@@ -470,6 +775,7 @@ export function App() {
   }, [addToast, debugByRunId, isDemo, memories, referencesByRunId, tracesByRunId]);
 
   const refreshDurableMemory = useCallback(async () => {
+    if (vaultReadsDisabledRef.current) return null;
     const generation = vaultUiGenerationRef.current;
     try {
       const refreshed = await continuumApi.refreshMemoryState();
@@ -488,6 +794,7 @@ export function App() {
 
   const refreshMemoryProposals = useCallback(async () => {
     if (isDemo) { setMemoryProposals(demoBootstrap.memoryProposals); return demoBootstrap.memoryProposals; }
+    if (vaultReadsDisabledRef.current) return null;
     const generation = vaultUiGenerationRef.current;
     try {
       const proposals = await continuumApi.listMemoryProposals();
@@ -503,6 +810,7 @@ export function App() {
 
   const resolveMemoryProposal = useCallback(async (proposal: TopicProposal, action: "accept" | "reject") => {
     if (isDemo) { setMemoryProposals((current) => current.filter((item) => item.id !== proposal.id)); return; }
+    if (offline) throw new ApiRequestError("Reconnect before changing durable memory.", "VAULT_READ_ONLY", true);
     const generation = vaultUiGenerationRef.current;
     try {
       await continuumApi.resolveMemoryProposal(proposal.id, action);
@@ -516,10 +824,11 @@ export function App() {
       addToast("danger", "Memory proposal was not changed", error instanceof Error ? error.message : undefined);
       throw error;
     }
-  }, [addToast, isDemo, refreshDurableMemory, refreshMemoryProposals]);
+  }, [addToast, isDemo, offline, refreshDurableMemory, refreshMemoryProposals]);
 
   const pollDurableMemory = useCallback(async (runId?: string) => {
     if (isDemo) return;
+    if (vaultReadsDisabledRef.current) return;
     if (runId && settings.memoryPaused) { await refreshDurableMemory(); return; }
     const generation = vaultUiGenerationRef.current;
     const pollKey = `${generation}:${runId ?? "__general__"}`;
@@ -585,6 +894,11 @@ export function App() {
     setRevisionEventId(eventId);
     setRevisions([]);
     setRevisionsError(null);
+    if (vaultReadsDisabledRef.current && !isDemo) {
+      setRevisionsError("Reconnect to load revision history from the local vault.");
+      setRevisionsLoading(false);
+      return;
+    }
     setRevisionsLoading(true);
     try {
       if (isDemo) {
@@ -608,11 +922,13 @@ export function App() {
       setRevisions((items) => items.map((revision) => ({ ...revision, active: revision.event.id === eventId, event: { ...revision.event, active: revision.event.id === eventId } })));
       return;
     }
+    if (offline) throw new ApiRequestError("Reconnect before changing the active response revision.", "VAULT_READ_ONLY", true);
     const generation = vaultUiGenerationRef.current;
     const { event } = await continuumApi.activateEventRevision(eventId);
     if (vaultUiGenerationRef.current !== generation) return;
     const groupIds = new Set(revisions.map((revision) => revision.event.id));
     setEvents((items) => items.map((item) => groupIds.has(item.id) ? { ...item, active: item.id === event.id } : item).map((item) => item.id === event.id ? event : item));
+    if (vaultReadsDisabledRef.current) return;
     const refreshed = await continuumApi.getEventRevisions(event.id);
     if (vaultUiGenerationRef.current !== generation) return;
     setRevisions(refreshed.revisions);
@@ -620,6 +936,11 @@ export function App() {
   };
 
   const updateSettings = async (patch: Partial<AppSettings>, quiet = false) => {
+    if (offline && !isDemo) {
+      const error = new ApiRequestError("Reconnect before changing vault settings.", "VAULT_READ_ONLY", true);
+      if (!quiet) addToast("warning", "Vault controls are read-only", error.message);
+      throw error;
+    }
     const generation = vaultUiGenerationRef.current;
     const previous = settings;
     setSettings((value) => ({ ...value, ...patch }));
@@ -678,7 +999,7 @@ export function App() {
       case "run.completed":
         setEvents((items) => [...items.filter((item) => item.id !== streamEvent.event.id && item.id !== streamingEventRef.current), streamEvent.event].sort((a, b) => a.sequence - b.sequence));
         streamingEventRef.current = null;
-        retryParentRef.current = null;
+        setRetryParent(null);
         setProgress(IDLE_PROGRESS);
         addToast("success", "Answer complete", `$${streamEvent.usage.estimatedCostUsd.toFixed(3)} · ${streamEvent.usage.inputTokens.toLocaleString()} input tokens`);
         void bootstrapQuery.refetch();
@@ -706,7 +1027,7 @@ export function App() {
         void refreshDurableMemory();
         break;
     }
-  }, [addToast, bootstrapQuery, budgetQuery, loadRunTrace, pollDurableMemory, refreshDurableMemory]);
+  }, [addToast, bootstrapQuery, budgetQuery, loadRunTrace, pollDurableMemory, refreshDurableMemory, setRetryParent]);
 
   const streamExistingRun = useCallback(async (runId: string, resume: { lastEventId?: string | null; assistantEventId?: string | null; initialContent?: string } = {}) => {
     if (activeStreamRunIdsRef.current.has(runId) || terminalStreamRunIdsRef.current.has(runId)) return;
@@ -758,9 +1079,14 @@ export function App() {
   }, [addToast]);
 
   useEffect(() => {
-    if (!bootstrapQuery.data || bootstrapQuery.isPlaceholderData || previewMode || offline) return;
-    const activeRun = bootstrapQuery.data.activeRuns.find((run) => !activeStreamRunIdsRef.current.has(run.id) && !terminalStreamRunIdsRef.current.has(run.id));
+    if (!bootstrapQuery.data || bootstrapQuery.isPlaceholderData || bootstrapQuery.isError || previewMode || offline) return;
+    const activeRun = bootstrapQuery.data.activeRuns.find((run) => !activeStreamRunIdsRef.current.has(run.id) && !automaticStreamRunIdsRef.current.has(run.id) && !terminalStreamRunIdsRef.current.has(run.id));
     if (!activeRun) return;
+    // A recovered run gets one automatic stream attachment per page lifetime.
+    // Once that connection is lost, only the explicit Resume action may attach
+    // again; otherwise ordinary state renders can silently replay deltas.
+    automaticStreamRunIdsRef.current.add(activeRun.id);
+    if (activeRun.userEventId) setRetryParent(activeRun.userEventId);
     const assistantEvent = activeRun.assistantEventId
       ? bootstrapQuery.data.events.find((event) => event.id === activeRun.assistantEventId)
       : undefined;
@@ -786,10 +1112,10 @@ export function App() {
       if (error instanceof DOMException && error.name === "AbortError") return;
       markRunConnectionLost(activeRun.id, error);
     });
-  }, [bootstrapQuery.data, bootstrapQuery.isPlaceholderData, markRunConnectionLost, offline, previewMode, streamExistingRun]);
+  }, [bootstrapQuery.data, bootstrapQuery.isError, bootstrapQuery.isPlaceholderData, markRunConnectionLost, offline, previewMode, setRetryParent, streamExistingRun]);
 
   useEffect(() => {
-    if (!bootstrapQuery.data || bootstrapQuery.isPlaceholderData || previewMode || offline) return;
+    if (!bootstrapQuery.data || bootstrapQuery.isPlaceholderData || bootstrapQuery.isError || previewMode || offline) return;
     const messageIntent = readMessageIntent();
     const regenerationIntent = readRegenerationIntent();
     if (!messageIntent && !regenerationIntent) return;
@@ -808,7 +1134,7 @@ export function App() {
             clearCommittedDraft(messageIntent);
             setAttachments([]);
             setEvents((items) => [...items.filter((item) => item.id !== recoveredMessage.result.event.id), recoveredMessage.result.event].sort((left, right) => left.sequence - right.sequence));
-            retryParentRef.current = recoveredMessage.result.event.id;
+            setRetryParent(recoveredMessage.result.event.id);
             addToast("info", "Recovered a safely saved message", "The original request was committed before the connection was lost; no duplicate was created.");
             void streamExistingRun(recoveredMessage.result.runId).catch((error) => {
               if (stale()) return;
@@ -903,7 +1229,7 @@ export function App() {
               markRunConnectionLost(recoveredRegeneration.result.runId, error);
             });
           } else {
-            retryParentRef.current = regenerationIntent.eventId;
+            setRetryParent(regenerationIntent.eventId);
             setProgress({ runId: null, stage: "failed", label: "The interrupted response retry was not committed. Retry again to reuse its exact identity." });
           }
         } catch (error) {
@@ -916,7 +1242,7 @@ export function App() {
 
     void recoverPersistedIntents();
     return () => { cancelled = true; };
-  }, [addToast, bootstrapQuery.data, bootstrapQuery.isPlaceholderData, clearCommittedDraft, markRunConnectionLost, offline, previewMode, streamExistingRun]);
+  }, [addToast, bootstrapQuery.data, bootstrapQuery.isError, bootstrapQuery.isPlaceholderData, clearCommittedDraft, markRunConnectionLost, offline, previewMode, setRetryParent, streamExistingRun]);
 
   useEffect(() => () => { abortRef.current?.abort(); }, []);
 
@@ -925,7 +1251,7 @@ export function App() {
     const runId = crypto.randomUUID(); const assistantId = crypto.randomUUID(); streamingEventRef.current = assistantId;
     if (demoBootstrap.debug.trace) {
       const trace = { ...demoBootstrap.debug.trace, id: crypto.randomUUID(), runId };
-      setTracesByRunId((current) => touchRunCache(current, runId, trace));
+      setTracesByRunId((current) => touchRunCache<RetrievalTrace>(current, runId, trace));
       setReferencesByRunId((current) => touchRunCache(current, runId, demoBootstrap.activeMemories));
     }
     setProgress({ runId, stage: "retrieving", label: "Looking through relevant history…" });
@@ -974,7 +1300,7 @@ export function App() {
           clearMessageIntent(messageIntent.idempotencyKey);
           clearCommittedDraft(messageIntent);
           setEvents((items) => [...items.filter((item) => item.id !== previous.result.event.id), previous.result.event].sort((left, right) => left.sequence - right.sequence));
-          retryParentRef.current = previous.result.event.id;
+          setRetryParent(previous.result.event.id);
           addToast("info", "The previous message was already saved", "Your edited draft remains in the composer. Continuum recovered the original run instead of creating a duplicate.");
           try { await streamExistingRun(previous.result.runId); }
           catch (error) { if (!(error instanceof DOMException && error.name === "AbortError")) markRunConnectionLost(previous.result.runId, error); }
@@ -1001,8 +1327,11 @@ export function App() {
       addToast("danger", "Safe retry storage is unavailable", "Continuum did not upload or send anything because it could not durably retain the retry identity.");
       return;
     }
+    // This page is actively executing the persisted intent. The mount recovery
+    // effect is only for intents inherited from an earlier page lifetime.
+    mutationRecoveryAttemptedRef.current.add(messageIntent.idempotencyKey);
 
-    retryParentRef.current = null;
+    setRetryParent(null);
     const eventId = crypto.randomUUID();
     const parentEventId = events.filter((event) => event.id !== omitFailedEventId).at(-1)?.id ?? null;
     const optimisticAttachments = outgoingFiles.map(provisionalAttachment);
@@ -1045,7 +1374,7 @@ export function App() {
       clearMessageIntent(messageIntent.idempotencyKey);
       clearCommittedDraft(messageIntent);
       for (const attachment of outgoingFiles) if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
-      retryParentRef.current = response.event.id;
+      setRetryParent(response.event.id);
       setEvents((items) => items.map((item) => item.id === eventId ? response.event : item));
       await streamExistingRun(response.runId);
     } catch (error) {
@@ -1069,6 +1398,10 @@ export function App() {
   };
 
   const resumeActiveResponse = async () => {
+    if (offline && !isDemo) {
+      addToast("warning", "The local service is offline", "Reconnect before resuming this response.");
+      return;
+    }
     const runId = progress.runId;
     if (!runId || progress.stage !== "connection_lost") return;
     const assistantEventId = streamingEventRef.current
@@ -1097,6 +1430,10 @@ export function App() {
   };
 
   const stopResponse = async () => {
+    if (offline && !isDemo) {
+      addToast("warning", "Vault controls are read-only", "Reconnect before cancelling a response.");
+      return;
+    }
     const runId = progress.runId;
     const markStopped = () => {
       if (runId) {
@@ -1127,6 +1464,10 @@ export function App() {
   };
 
   const regenerate = async (eventId: string) => {
+    if (offline && !isDemo) {
+      addToast("warning", "The local service is offline", "Reconnect before retrying a response.");
+      return;
+    }
     if (!["idle", "cancelled", "failed"].includes(progress.stage)) {
       addToast("warning", "Another response is still active", "Resume or stop it before regenerating a response.");
       return;
@@ -1155,6 +1496,7 @@ export function App() {
       addToast("danger", "Safe retry storage is unavailable", "Continuum did not start a regeneration because its exact retry identity could not be retained.");
       return;
     }
+    mutationRecoveryAttemptedRef.current.add(regenerationIntent.idempotencyKey);
     let runId: string | null = null;
     try {
       const response = await continuumApi.regenerate(eventId, regenerationIntent.idempotencyKey);
@@ -1166,7 +1508,7 @@ export function App() {
       if (error instanceof DOMException && error.name === "AbortError") return;
       if (runId) markRunConnectionLost(runId, error);
       else {
-        retryParentRef.current = eventId;
+        setRetryParent(eventId);
         setProgress({ runId: null, stage: "failed", label: "Response retry was not confirmed. Retry again to reuse the same durable identity." });
         addToast("danger", "Could not confirm the response retry", error instanceof Error ? error.message : undefined);
       }
@@ -1176,6 +1518,10 @@ export function App() {
   const jumpToEvent = async (eventId: string) => {
     const generation = vaultUiGenerationRef.current;
     if (!events.some((event) => event.id === eventId) && !isDemo) {
+      if (vaultReadsDisabledRef.current) {
+        addToast("warning", "Vault reads are unavailable", "Reconnect before loading evidence outside the last verified timeline view.");
+        return;
+      }
       try {
         const event = await continuumApi.getEvent(eventId);
         if (vaultUiGenerationRef.current !== generation) return;
@@ -1201,6 +1547,10 @@ export function App() {
       const memory = demoBootstrap.activeMemories.find((item) => item.id === id || item.sourceEventId === id);
       if (memory?.sourceEventId && events.some((event) => event.id === memory.sourceEventId)) { await jumpToEvent(memory.sourceEventId); return; }
       addToast("info", memory?.title ?? "Preview evidence", memory?.excerpt ?? "This explicit preview does not contain a separate retained record for that evidence ID.");
+      return;
+    }
+    if (vaultReadsDisabledRef.current) {
+      addToast("warning", "Vault reads are unavailable", "Reconnect before loading exact evidence from the local vault.");
       return;
     }
     setEvidenceOpen(true); setEvidenceRecord(null); setEvidenceError(null); setEvidenceLoading(true);
@@ -1234,6 +1584,11 @@ export function App() {
       else addToast("info", "Related preview page is not included", identity);
       return;
     }
+    if (vaultReadsDisabledRef.current) {
+      if (known) setTopicDetail(known);
+      else addToast("warning", "Vault reads are unavailable", "Reconnect before loading that memory page.");
+      return;
+    }
     try {
       const topic = await continuumApi.getTopic(known?.id ?? identity);
       if (vaultUiGenerationRef.current !== generation) return;
@@ -1255,7 +1610,7 @@ export function App() {
   };
 
   const loadOlderEvents = async () => {
-    if (!eventsCursor || loadingOlder || isDemo) return;
+    if (!eventsCursor || loadingOlder || isDemo || vaultReadsDisabledRef.current) return;
     setLoadingOlder(true);
     const generation = vaultUiGenerationRef.current;
     try {
@@ -1275,6 +1630,7 @@ export function App() {
   };
 
   const selectSearchResult = async (result: SearchResult) => {
+    if (vaultReadsDisabledRef.current && !isDemo) return;
     const generation = vaultUiGenerationRef.current;
     if (result.type === "event") await jumpToEvent(result.id);
     else if (result.type === "topic") {
@@ -1291,6 +1647,10 @@ export function App() {
   };
 
   const requestDelete = async (resource: "events" | "attachments" | "claims" | "topics", id: string, title: string) => {
+    if (offline && !isDemo) {
+      addToast("warning", "Vault controls are read-only", "Reconnect before permanently deleting anything.");
+      return;
+    }
     const generation = vaultUiGenerationRef.current;
     setDeleteTarget({ resource, id, title }); setDeleteImpact(null); setDeleteLoading(true);
     try {
@@ -1307,42 +1667,261 @@ export function App() {
     finally { if (vaultUiGenerationRef.current === generation) setDeleteLoading(false); }
   };
 
+  const scrubCommittedDeletion = async (options: { clearSettings?: boolean } = {}) => {
+    const clearedSettings = options.clearSettings ? freshDefaultSettings() : null;
+    const fullVaultBoundary = options.clearSettings === true;
+    deletionScrubActiveRef.current = true;
+    vaultUiGenerationRef.current += 1;
+    const generation = vaultUiGenerationRef.current;
+    continuumApi.resetVaultReadScope();
+    if (clearedSettings) {
+      continuumApi.resetVaultSettingsCache();
+      setSettings(clearedSettings);
+    }
+    const cancellations = Promise.all([
+      queryClient.cancelQueries({ queryKey: ["bootstrap"] }),
+      queryClient.cancelQueries({ queryKey: ["budget"] })
+    ]);
+    abortRef.current?.abort();
+    abortRef.current = null;
+    activeStreamRunIdsRef.current.clear();
+    terminalStreamRunIdsRef.current.clear();
+    memoryPollRunIdsRef.current.clear();
+    mutationRecoveryAttemptedRef.current.clear();
+    streamingEventRef.current = null;
+    cancellationAcknowledgedRef.current = false;
+    clearAllRunStreamCheckpoints();
+    if (fullVaultBoundary) {
+      clearAllMutationIntents();
+      draftRevisionRef.current = null;
+      setDraftState("");
+      try {
+        localStorage.removeItem(DRAFT_KEY);
+        localStorage.removeItem(DRAFT_REVISION_KEY);
+      } catch { /* In-memory draft and mutation identity are already cleared. */ }
+    }
+    setRetryParent(null);
+    setProgress(IDLE_PROGRESS);
+    if (fullVaultBoundary) {
+      for (const attachment of attachments) if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+      setAttachments([]);
+    }
+    selectedRunIdRef.current = null;
+    setEvents([]);
+    setEventsCursor(null);
+    setLoadingOlder(false);
+    setTopics([]);
+    setClaims([]);
+    setMemories([]);
+    setMemoryProposals([]);
+    setGraph({ nodes: [], edges: [], focusId: null, truncated: false });
+    setGraphRequest({ hops: 1, includeHistory: false });
+    setDebugSnapshot(INITIAL_BOOTSTRAP.debug);
+    setTracesByRunId({});
+    setReferencesByRunId({});
+    setDebugByRunId({});
+    setLoadingTraceRunIds(new Set());
+    setSelectedRunId(null);
+    setHighlightedEventId(null);
+    setRevealedEventIds(new Set());
+    setTopicDetail(null);
+    setTopicEditor(null);
+    setRevisionEventId(null);
+    setRevisions([]);
+    setRevisionsLoading(false);
+    setRevisionsError(null);
+    setEvidenceOpen(false);
+    setEvidenceRecord(null);
+    setEvidenceLoading(false);
+    setEvidenceError(null);
+    setMergeOpen(false);
+    setMergeCandidates([]);
+    setMergeLoading(false);
+    setMergeError(null);
+    setDrawer(null);
+    setSearchOpen(false);
+    setSettingsOpen(false);
+    setResetOpen(false);
+    setVaultImpact(null);
+    setVaultImpactLoading(false);
+    setVaultImpactError(null);
+    setDeleteTarget(null);
+    setDeleteImpact(null);
+    setDeleteLoading(false);
+    setToasts([]);
+    setVaultRefreshFailed(true);
+    queryClient.setQueryData<BootstrapData | undefined>(["bootstrap"], (current) => current ? {
+      ...current,
+      events: [],
+      eventsNextCursor: null,
+      activeRuns: [],
+      latestFailedRun: null,
+      topics: [],
+      claims: [],
+      graph: { nodes: [], edges: [], focusId: null, truncated: false },
+      activeMemories: [],
+      attention: [],
+      memoryProposals: [],
+      debug: INITIAL_BOOTSTRAP.debug,
+      ...(clearedSettings ? { settings: clearedSettings } : {})
+    } : current);
+    await cancellations;
+    queryClient.setQueryData<BootstrapData | undefined>(["bootstrap"], (current) => current ? {
+      ...current,
+      events: [],
+      eventsNextCursor: null,
+      activeRuns: [],
+      latestFailedRun: null,
+      topics: [],
+      claims: [],
+      graph: { nodes: [], edges: [], focusId: null, truncated: false },
+      activeMemories: [],
+      attention: [],
+      memoryProposals: [],
+      debug: INITIAL_BOOTSTRAP.debug,
+      ...(clearedSettings ? { settings: clearedSettings } : {})
+    } : current);
+    return generation;
+  };
+
+  const leaveDemoPreview = async (): Promise<"restored" | "scrubbed"> => {
+    const snapshot = trustedPersonalSnapshotRef.current;
+    if (!snapshot || leavingPreview) return "scrubbed";
+    setLeavingPreview(true);
+    try {
+      const refreshed = await bootstrapQuery.refetch();
+      const next = refreshed.data;
+      const sameBoundary = !refreshed.isError && next
+        && next.vaultBoundary.generation === snapshot.vaultBoundary.generation
+        && next.vaultBoundary.vaultId === snapshot.vaultBoundary.vaultId
+        && !next.vaultBoundary.maintenanceLocked;
+      if (sameBoundary && restoreTrustedPersonalSnapshot()) {
+        addToast("info", "Returned to your personal vault");
+        return "restored";
+      }
+
+      // A failed or changed boundary can mean another tab deleted or replaced
+      // the personal vault while this tab was previewing. Never republish the
+      // retained vault snapshot in that ambiguity. Keep only user-authored
+      // composer work, with fresh retry identities that cannot target the old
+      // vault, and require an explicit canonical reconnect.
+      trustedPersonalSnapshotRef.current = null;
+      const preservedDraft = snapshot.draft;
+      const preservedAttachments = snapshot.attachments.map((attachment) => {
+        const { remote: _remote, error: _error, fileUnavailable: _fileUnavailable, ...local } = attachment;
+        void _remote; void _error; void _fileUnavailable;
+        return { ...local, idempotencyKey: crypto.randomUUID(), status: "pending" as const };
+      });
+      skipNextCanonicalHydrationRef.current = true;
+      setPreviewMode(false);
+      await scrubCommittedDeletion({ clearSettings: true });
+      const preservedRevision = crypto.randomUUID();
+      draftRevisionRef.current = preservedRevision;
+      setDraftState(preservedDraft);
+      setAttachments(preservedAttachments);
+      try {
+        localStorage.setItem(DRAFT_REVISION_KEY, preservedRevision);
+        if (preservedDraft) localStorage.setItem(DRAFT_KEY, preservedDraft); else localStorage.removeItem(DRAFT_KEY);
+      } catch { /* The fail-closed in-memory draft remains available while offline. */ }
+      deletionScrubActiveRef.current = false;
+      setVaultRefreshFailed(true);
+      addToast(
+        "warning",
+        next ? "Your personal vault changed during preview" : "Your personal vault could not be verified",
+        "The retained vault view was scrubbed. Reconnect to load one canonical snapshot; your unsent draft remains available."
+      );
+      return "scrubbed";
+    } finally {
+      setLeavingPreview(false);
+    }
+  };
+
   const confirmDelete = async () => {
     if (!deleteTarget || !deleteImpact) return;
+    if (offline && !isDemo) {
+      addToast("warning", "Vault controls are read-only", "Reconnect and review a fresh deletion impact before deleting anything.");
+      return;
+    }
+    const target = deleteTarget;
+    const impact = deleteImpact;
     const generation = vaultUiGenerationRef.current;
+    if (isDemo) {
+      if (target.resource === "events") setEvents((items) => items.filter((item) => item.id !== target.id));
+      else if (target.resource === "attachments") setEvents((items) => items.map((event) => ({ ...event, attachments: event.attachments.filter((attachment) => attachment.id !== target.id) })));
+      else if (target.resource === "claims") setClaims((items) => items.filter((item) => item.id !== target.id));
+      else setTopics((items) => items.filter((item) => item.id !== target.id));
+      setMemories((items) => items.filter((item) => item.id !== target.id));
+      setDeleteTarget(null);
+      setDeleteImpact(null);
+      addToast("success", "Deleted from preview");
+      return;
+    }
+
     try {
-      if (!isDemo) await continuumApi.confirmDeletion(deleteTarget.resource, deleteTarget.id, deleteImpact.confirmationToken);
+      await continuumApi.confirmDeletion(target.resource, target.id, impact.confirmationToken);
       if (vaultUiGenerationRef.current !== generation) return;
-      if (deleteTarget.resource === "events") setEvents((items) => items.filter((item) => item.id !== deleteTarget.id));
-      else if (deleteTarget.resource === "attachments") { setEvents((items) => items.map((event) => ({ ...event, attachments: event.attachments.filter((attachment) => attachment.id !== deleteTarget.id) }))); setMemories((items) => items.filter((item) => item.id !== deleteTarget.id)); }
-      else if (deleteTarget.resource === "claims") {
-        setClaims((items) => items.filter((item) => item.id !== deleteTarget.id));
-        setMemories((items) => items.filter((item) => item.id !== deleteTarget.id));
-        setReferencesByRunId((groups) => Object.fromEntries(Object.entries(groups).map(([runId, items]) => [runId, items.filter((item) => item.id !== deleteTarget.id)])));
-        setEvidenceOpen(false); setEvidenceRecord(null); setEvidenceError(null);
-      } else { setTopics((items) => items.filter((item) => item.id !== deleteTarget.id)); setMemories((items) => items.filter((item) => item.id !== deleteTarget.id)); }
-      setDeleteTarget(null); setDeleteImpact(null); addToast("success", "Deleted permanently", "Derived memory without independent support was removed.");
-      if (!isDemo) void pollDurableMemory();
+      const refreshGeneration = await scrubCommittedDeletion();
+      try {
+        const refreshed = await bootstrapQuery.refetch();
+        if (vaultUiGenerationRef.current !== refreshGeneration) return;
+        if (refreshed.isError || !refreshed.data) throw refreshed.error ?? new Error("The canonical vault view could not be reloaded.");
+        const next = refreshed.data;
+        const trace = next.debug.trace;
+        deletionScrubActiveRef.current = false;
+        setEvents(next.events);
+        setEventsCursor(next.eventsNextCursor);
+        setTopics(next.topics);
+        setClaims(next.claims);
+        setMemories(next.activeMemories);
+        setMemoryProposals(next.memoryProposals);
+        setGraph(next.graph);
+        setDebugSnapshot(next.debug);
+        setSettings(next.settings);
+        setTracesByRunId(trace ? { [trace.runId]: trace } : {});
+        setReferencesByRunId(trace ? { [trace.runId]: next.activeMemories } : {});
+        setDebugByRunId(trace ? { [trace.runId]: next.debug } : {});
+        selectedRunIdRef.current = trace?.runId ?? null;
+        setSelectedRunId(trace?.runId ?? null);
+        applyRunRecovery(next);
+        setVaultRefreshFailed(false);
+        addToast("success", "Deleted permanently", "The canonical timeline and memory view were reloaded after the deletion.");
+      } catch (refreshError) {
+        if (vaultUiGenerationRef.current !== refreshGeneration) return;
+        deletionScrubActiveRef.current = false;
+        setVaultRefreshFailed(true);
+        addToast("warning", "Deletion committed, but the view needs to reconnect", refreshError instanceof Error ? `${refreshError.message} Deleted content remains scrubbed from this browser view.` : "Deleted content remains scrubbed from this browser view.");
+      }
     } catch (error) {
       if (vaultUiGenerationRef.current !== generation) return;
-      addToast("danger", "Nothing was deleted", error instanceof Error ? error.message : "The impact may have changed; review it again.");
-      if (!isDemo) {
-        setDeleteLoading(true);
-        try {
-          const impact = await continuumApi.deletionImpact(deleteTarget.resource, deleteTarget.id);
-          if (vaultUiGenerationRef.current !== generation) return;
-          setDeleteImpact(impact);
-        }
-        catch {
-          if (vaultUiGenerationRef.current !== generation) return;
-          setDeleteTarget(null); setDeleteImpact(null);
-        }
-        finally { if (vaultUiGenerationRef.current === generation) setDeleteLoading(false); }
+      const explicitlyPreCommit = error instanceof ApiRequestError
+        && error.status >= 400
+        && error.status < 500
+        && error.code !== "DELETION_RECOVERY_REQUIRED";
+      if (!explicitlyPreCommit) {
+        const scrubGeneration = await scrubCommittedDeletion();
+        if (vaultUiGenerationRef.current !== scrubGeneration) return;
+        deletionScrubActiveRef.current = false;
+        setVaultRefreshFailed(true);
+        addToast("warning", "Deletion committed or may have committed", "The response was lost or cleanup requires recovery. Potentially deleted content was scrubbed from this browser; reconnect to load the canonical vault state.");
+        return;
       }
+      addToast("danger", "Nothing was deleted", error instanceof Error ? error.message : "The impact may have changed; review it again.");
+      setDeleteLoading(true);
+      try {
+        const refreshedImpact = await continuumApi.deletionImpact(target.resource, target.id);
+        if (vaultUiGenerationRef.current !== generation) return;
+        setDeleteImpact(refreshedImpact);
+      }
+      catch {
+        if (vaultUiGenerationRef.current !== generation) return;
+        setDeleteTarget(null); setDeleteImpact(null);
+      }
+      finally { if (vaultUiGenerationRef.current === generation) setDeleteLoading(false); }
     }
   };
 
   const saveTopic = async (topic: TopicPage, patch: Partial<TopicPage>) => {
+    if (offline && !isDemo) throw new ApiRequestError("Reconnect before saving a trusted revision.", "VAULT_READ_ONLY", true);
     const generation = vaultUiGenerationRef.current;
     const updated = isDemo ? { ...topic, ...patch, revision: topic.revision + 1, updatedAt: new Date().toISOString() } : await continuumApi.updateTopic(topic.id, patch, topic.revision);
     if (vaultUiGenerationRef.current !== generation) return;
@@ -1363,6 +1942,10 @@ export function App() {
       addToast("info", pinned ? "Pinned in this preview" : "Removed from preview pins", memory.title);
       return;
     }
+    if (offline) {
+      addToast("warning", "Vault controls are read-only", "Reconnect before changing pinned memory.");
+      return;
+    }
     try {
       const generation = vaultUiGenerationRef.current;
       const result = await continuumApi.setPinned(memory, pinned);
@@ -1377,6 +1960,7 @@ export function App() {
 
   const correctClaim = async (claimId: string, value: string, reason: string) => {
     if (isDemo) throw new ApiRequestError("Claim corrections are disabled in the immutable preview.", "PREVIEW_READ_ONLY", false);
+    if (offline) throw new ApiRequestError("Reconnect before correcting a claim.", "VAULT_READ_ONLY", true);
     const generation = vaultUiGenerationRef.current;
     const corrected = await continuumApi.correctClaim(claimId, value, reason);
     if (vaultUiGenerationRef.current !== generation) return;
@@ -1393,6 +1977,10 @@ export function App() {
     setMergeCandidates([]);
     setMergeError(null);
     if (isDemo) return;
+    if (vaultReadsDisabledRef.current) {
+      setMergeError("Reconnect before reviewing entity merge candidates.");
+      return;
+    }
     setMergeLoading(true);
     try {
       const candidates = await continuumApi.listEntityMergeCandidates();
@@ -1408,6 +1996,7 @@ export function App() {
 
   const reviewEntityMerge = async (sourceId: string, targetId: string): Promise<EntityMergeEnvelope> => {
     if (isDemo) throw new ApiRequestError("Entity merging is disabled in the immutable preview.", "PREVIEW_READ_ONLY", false);
+    if (offline) throw new ApiRequestError("Reconnect before reviewing an entity merge.", "VAULT_READ_ONLY", true);
     const generation = vaultUiGenerationRef.current;
     const envelope = await continuumApi.entityMergeImpact(sourceId, targetId);
     if (vaultUiGenerationRef.current !== generation) throw new ApiRequestError("The vault changed while the merge was being reviewed.", "VAULT_CHANGED", true);
@@ -1415,6 +2004,7 @@ export function App() {
   };
 
   const mergeEntities = async (envelope: EntityMergeEnvelope): Promise<EntityMergeResult> => {
+    if (offline) throw new ApiRequestError("Reconnect before merging entities.", "VAULT_READ_ONLY", true);
     const generation = vaultUiGenerationRef.current;
     const result = await continuumApi.mergeEntities(envelope);
     if (vaultUiGenerationRef.current !== generation) throw new ApiRequestError("The vault changed while the merge was being applied.", "VAULT_CHANGED", true);
@@ -1424,6 +2014,7 @@ export function App() {
   };
 
   const reverseEntityMerge = async (mergeId: string, entityId?: string) => {
+    if (offline) throw new ApiRequestError("Reconnect before reversing an entity merge.", "VAULT_READ_ONLY", true);
     const generation = vaultUiGenerationRef.current;
     await continuumApi.reverseEntityMerge(mergeId);
     if (vaultUiGenerationRef.current !== generation) return;
@@ -1458,6 +2049,10 @@ export function App() {
     if (latest?.runId) { void loadRunTrace(latest.runId, true); setInspectorTab("memory"); }
   };
   const showInGraph = async (focusId: string) => {
+    if (vaultReadsDisabledRef.current && !isDemo) {
+      addToast("warning", "Knowledge graph unavailable", "Reconnect before opening a graph neighborhood.");
+      return;
+    }
     const generation = vaultUiGenerationRef.current;
     try {
       setGraphRequest({ hops: 2, includeHistory: true });
@@ -1476,6 +2071,12 @@ export function App() {
   };
 
   const loadVaultImpact = async () => {
+    if (vaultReadsDisabledRef.current && !isDemo) {
+      setVaultImpact(null);
+      setVaultImpactError("Reconnect before calculating the current vault impact.");
+      setVaultImpactLoading(false);
+      return;
+    }
     const generation = vaultUiGenerationRef.current;
     setVaultImpactLoading(true);
     setVaultImpactError(null);
@@ -1483,7 +2084,7 @@ export function App() {
     try {
       const impact = isDemo ? {
         confirmationToken: "preview-vault",
-        requiredPhrase: "DELETE MY CONTINUUM VAULT",
+        requiredPhrase: "DELETE MY CONTINUUM VAULT" as const,
         events: events.length,
         attachments: events.reduce((total, event) => total + event.attachments.length, 0),
         claimsRemoved: previewMode ? demoBootstrap.claims.length : 0,
@@ -1503,59 +2104,130 @@ export function App() {
   };
 
   const openVaultReset = () => {
+    if (offline && !isDemo) {
+      addToast("warning", "Vault controls are read-only", "Reconnect before starting a destructive vault reset.");
+      return;
+    }
     setSettingsOpen(false);
     setResetOpen(true);
     void loadVaultImpact();
   };
 
+  const confirmVaultReset = async (impact: VaultDeletionImpact) => {
+    if (offline && !isDemo) {
+      addToast("warning", "Vault controls are read-only", "Reconnect and calculate a fresh vault impact before destroying the vault.");
+      return;
+    }
+    if (isDemo) {
+      if (previewMode) {
+        const outcome = await leaveDemoPreview();
+        if (outcome === "scrubbed") return;
+      } else {
+        resetVaultScopedUiState({ requireCanonicalRefresh: false, preserveBootstrap: true });
+      }
+      setResetOpen(false);
+      setVaultImpact(null);
+      setOnboardingOpen(true);
+      addToast("success", "Preview cleared");
+      return;
+    }
+    const generation = vaultUiGenerationRef.current;
+    try {
+      await continuumApi.destroyVault(impact.requiredPhrase, impact.confirmationToken);
+      if (vaultUiGenerationRef.current !== generation) return;
+      const refreshGeneration = await scrubCommittedDeletion({ clearSettings: true });
+      try {
+        const refreshed = await bootstrapQuery.refetch();
+        if (vaultUiGenerationRef.current !== refreshGeneration) return;
+        if (refreshed.isError || !refreshed.data) throw refreshed.error ?? new Error("The empty canonical vault could not be reloaded.");
+        const next = refreshed.data;
+        hydrateCanonicalVaultSnapshot(next);
+        setOnboardingOpen(true);
+        addToast("success", "Vault destroyed", "The empty canonical vault was reloaded.");
+      } catch (refreshError) {
+        if (vaultUiGenerationRef.current !== refreshGeneration) return;
+        deletionScrubActiveRef.current = false;
+        setVaultRefreshFailed(true);
+        addToast("warning", "Vault destruction committed, but the view needs to reconnect", refreshError instanceof Error ? `${refreshError.message} Old vault content remains scrubbed from this browser.` : "Old vault content remains scrubbed from this browser.");
+      }
+    } catch (error) {
+      if (vaultUiGenerationRef.current !== generation) return;
+      const explicitlyPreCommit = error instanceof ApiRequestError
+        && error.status >= 400
+        && error.status < 500
+        && error.code !== "VAULT_DESTROY_RECOVERY_REQUIRED";
+      if (!explicitlyPreCommit) {
+        const scrubGeneration = await scrubCommittedDeletion({ clearSettings: true });
+        if (vaultUiGenerationRef.current !== scrubGeneration) return;
+        deletionScrubActiveRef.current = false;
+        setVaultRefreshFailed(true);
+        addToast("warning", "Vault destruction committed or may have committed", "The response was lost or cleanup requires recovery. Old vault content was scrubbed from this browser; reconnect to load the canonical state.");
+        return;
+      }
+      const message = error instanceof Error ? error.message : "The vault changed; calculate the impact again.";
+      setVaultImpact(null);
+      setVaultImpactError(message);
+      addToast("danger", "Vault was not destroyed", message);
+    }
+  };
+
+  const retryVaultConnection = async () => {
+    const generation = vaultUiGenerationRef.current;
+    const refreshed = await bootstrapQuery.refetch();
+    if (vaultUiGenerationRef.current !== generation) return;
+    if (refreshed.isError || !refreshed.data) {
+      setVaultRefreshFailed(true);
+      return;
+    }
+    hydrateCanonicalVaultSnapshot(refreshed.data);
+    void budgetQuery.refetch();
+  };
+
   return <div className={appClass}>
-    <TopBar runtime={runtime} quality={settings.quality} memoryPaused={settings.memoryPaused} drawer={drawer} onQuality={(quality: QualityPreset) => void updateSettings({ quality }, true).catch(() => undefined)} onSearch={() => setSearchOpen(true)} onDrawer={(next) => { if (next === "memory") openMemoryInspector(); else { if (next === "graph") setGraphRequest({ hops: 1, includeHistory: false }); setDrawer(next); } }} onSettings={() => setSettingsOpen(true)} onToggleMemory={() => void updateSettings({ memoryPaused: !settings.memoryPaused }, true).catch(() => undefined)} />
+    <TopBar runtime={runtime} quality={settings.quality} memoryPaused={settings.memoryPaused} mutationsDisabled={offline && !isDemo} vaultReadsDisabled={vaultReadsDisabled} drawer={drawer} onQuality={(quality: QualityPreset) => void updateSettings({ quality }, true).catch(() => undefined)} onSearch={() => { if (!vaultReadsDisabledRef.current) setSearchOpen(true); }} onDrawer={(next) => { if (next === "memory") openMemoryInspector(); else { if (vaultReadsDisabledRef.current) return; if (next === "graph") setGraphRequest({ hops: 1, includeHistory: false }); setDrawer(next); } }} onSettings={() => setSettingsOpen(true)} onToggleMemory={() => void updateSettings({ memoryPaused: !settings.memoryPaused }, true).catch(() => undefined)} />
     <main className="chat-shell">
       <section className="chat-column" aria-label="Conversation">
-        <div className={`timeline-intro ${previewMode ? "preview-intro" : offline ? "offline-intro" : ""}`}><div className="memory-orbit"><BrainCircuit size={22} /></div><div><span>{previewMode ? "Temporary demo preview" : offline ? "Local service offline" : "One continuous conversation"}</span><p>{previewMode ? "Nothing you do here changes your personal vault or spends API credit." : offline ? "No vault content was loaded or replaced. Restart the local service, then reconnect." : "Every retained turn is stored locally. Only selected context is sent to the configured model."}</p></div>{previewMode ? <button type="button" className="secondary-button" onClick={() => { setTracesByRunId({}); setReferencesByRunId({}); setSelectedRunId(null); setPreviewMode(false); addToast("info", "Returned to your personal vault"); }}>Leave preview</button> : offline ? <button type="button" className="secondary-button" disabled={bootstrapQuery.isFetching} onClick={() => void bootstrapQuery.refetch()}>{bootstrapQuery.isFetching ? "Connecting…" : "Retry connection"}</button> : <div className="timeline-count"><strong>{events.length.toLocaleString()}</strong><span>events loaded</span></div>}</div>
+        <div className={`timeline-intro ${previewMode ? "preview-intro" : offline ? "offline-intro" : ""}`}><div className="memory-orbit"><BrainCircuit size={22} /></div><div><span>{previewMode ? "Temporary demo preview" : offline ? "Local service offline" : "One continuous conversation"}</span><p>{previewMode ? "Nothing you do here changes your personal vault or spends API credit." : offline ? events.length ? "The last verified vault view is preserved read-only. Reconnect before sending or changing local data." : "No vault content was loaded or substituted. Restart the local service, then reconnect." : "Every retained turn is stored locally. Only selected context is sent to the configured model."}</p></div>{previewMode ? <button type="button" className="secondary-button" disabled={leavingPreview} onClick={() => void leaveDemoPreview()}>{leavingPreview ? "Verifying vault…" : "Leave preview"}</button> : offline ? <button type="button" className="secondary-button" disabled={bootstrapQuery.isFetching} onClick={() => void retryVaultConnection()}>{bootstrapQuery.isFetching ? "Connecting…" : "Retry connection"}</button> : <div className="timeline-count"><strong>{events.length.toLocaleString()}</strong><span>events loaded</span></div>}</div>
         <ChatTimeline events={events} offline={offline} hasOlder={Boolean(eventsCursor) && !isDemo} loadingOlder={loadingOlder} onLoadOlder={() => void loadOlderEvents()} referencesByRunId={timelineReferences} loadingTraceRunIds={loadingTraceRunIds} highlightedEventId={highlightedEventId} revealedEventIds={revealedEventIds} onSource={navigateMemory} onInspectAnswer={(event) => { if (event.runId) void loadRunTrace(event.runId, true); }} onShowInGraph={(event) => void showInGraph(event.id)} onOpenRevisions={(id) => void openRevisions(id)} onRegenerate={(id) => void regenerate(id)} onDelete={(id) => { const event = events.find((item) => item.id === id); void requestDelete("events", id, event?.content.slice(0, 50) || "message"); }} onDeleteAttachment={(id, title) => void requestDelete("attachments", id, title)} onRetry={(id) => { const failed = events.find((event) => event.id === id); if (failed?.role === "user") { setEvents((items) => items.filter((event) => event.id !== id)); void sendMessage(id); } else void regenerate(id); }} />
-        <Composer draft={draft} attachments={attachments} progress={progress} memoryPaused={settings.memoryPaused} webSearchEnabled={settings.webSearchEnabled} retryAvailable={Boolean(retryParentRef.current)} disabled={offline} onDraft={setDraft} onFiles={addFiles} onRemoveAttachment={removeAttachment} onSubmit={() => void sendMessage()} onStop={() => void stopResponse()} onResumeResponse={() => void resumeActiveResponse()} onRetryResponse={() => { if (retryParentRef.current) void regenerate(retryParentRef.current); }} onToggleMemory={() => void updateSettings({ memoryPaused: !settings.memoryPaused }, true).catch(() => undefined)} onToggleWeb={() => void updateSettings({ webSearchEnabled: !settings.webSearchEnabled }, true).catch(() => undefined)} />
+        <Composer draft={draft} attachments={attachments} progress={progress} memoryPaused={settings.memoryPaused} webSearchEnabled={settings.webSearchEnabled} retryAvailable={Boolean(retryParentId)} disabled={offline} onDraft={setDraft} onFiles={addFiles} onRemoveAttachment={removeAttachment} onSubmit={() => void sendMessage()} onStop={() => void stopResponse()} onResumeResponse={() => void resumeActiveResponse()} onRetryResponse={() => { if (retryParentId) void regenerate(retryParentId); }} onToggleMemory={() => void updateSettings({ memoryPaused: !settings.memoryPaused }, true).catch(() => undefined)} onToggleWeb={() => void updateSettings({ webSearchEnabled: !settings.webSearchEnabled }, true).catch(() => undefined)} />
       </section>
     </main>
-    <MemoryInspector open={drawer === "memory"} requestedTab={inspectorTab} answerRunId={selectedRunId} traceLoading={Boolean(selectedRunId && loadingTraceRunIds.has(selectedRunId))} memories={memories} topics={activeTopics} attention={previewMode ? demoBootstrap.attention : data.attention} proposals={memoryProposals} debug={selectedDebug} runtime={runtime} budget={currentBudget} onClose={() => setDrawer(null)} onNavigate={navigateMemory} onPin={(memory, pinned) => void togglePin(memory, pinned)} onEditTopic={setTopicEditor} onDeleteMemory={(memory) => { if (memory.type === "topic") void requestDelete("topics", memory.id, memory.title); else if (memory.type === "claim") void requestDelete("claims", memory.id, memory.title); else if (memory.type === "attachment") void requestDelete("attachments", memory.id, memory.title); else if (memory.type === "event") void requestDelete("events", memory.id, memory.title); }} onResolveProposal={resolveMemoryProposal} onReviewEntityMerges={() => void openMergeReview()} onRetryJob={(id) => { void continuumApi.retryJob(id).then(() => addToast("success", "Job queued for retry")).catch((error: unknown) => addToast("danger", "Job could not be retried", error instanceof Error ? error.message : undefined)); }} onLint={() => { if (isDemo) addToast("success", "Memory lint complete", "The preview vault has no destructive issues."); else void continuumApi.runMemoryLint().then(() => addToast("info", "Deep memory lint queued")).catch((error: unknown) => addToast("danger", "Memory lint could not start", error instanceof Error ? error.message : undefined)); }} />
+    <MemoryInspector open={drawer === "memory"} requestedTab={inspectorTab} answerRunId={selectedRunId} traceLoading={Boolean(selectedRunId && loadingTraceRunIds.has(selectedRunId))} memories={memories} topics={activeTopics} attention={previewMode ? demoBootstrap.attention : data.attention} proposals={memoryProposals} debug={selectedDebug} runtime={runtime} budget={currentBudget} onClose={() => setDrawer(null)} onNavigate={navigateMemory} onPin={(memory, pinned) => void togglePin(memory, pinned)} onEditTopic={setTopicEditor} onDeleteMemory={(memory) => { if (memory.type === "topic") void requestDelete("topics", memory.id, memory.title); else if (memory.type === "claim") void requestDelete("claims", memory.id, memory.title); else if (memory.type === "attachment") void requestDelete("attachments", memory.id, memory.title); else if (memory.type === "event") void requestDelete("events", memory.id, memory.title); }} onResolveProposal={resolveMemoryProposal} onReviewEntityMerges={() => void openMergeReview()} onRetryJob={(id) => { if (offline) { addToast("warning", "Vault controls are read-only", "Reconnect before retrying a memory job."); return; } void continuumApi.retryJob(id).then(() => addToast("success", "Job queued for retry")).catch((error: unknown) => addToast("danger", "Job could not be retried", error instanceof Error ? error.message : undefined)); }} onLint={() => { if (isDemo) addToast("success", "Memory lint complete", "The preview vault has no destructive issues."); else if (offline) addToast("warning", "Vault controls are read-only", "Reconnect before starting memory lint."); else void continuumApi.runMemoryLint().then(() => addToast("info", "Deep memory lint queued")).catch((error: unknown) => addToast("danger", "Memory lint could not start", error instanceof Error ? error.message : undefined)); }} />
     {drawer === "graph" && <KnowledgeGraph graph={graph} topics={topics} initialHops={graphRequest.hops} initialIncludeHistory={graphRequest.includeHistory} onClose={() => setDrawer(null)} onRequestGraph={(focusId, hops, history) => {
       const generation = vaultUiGenerationRef.current;
       setGraphRequest({ hops, includeHistory: history });
       if (isDemo) { setGraph((current) => ({ ...current, focusId: focusId ?? current.focusId })); return; }
+      if (vaultReadsDisabledRef.current) return;
       void continuumApi.getGraph(focusId, hops, history).then((nextGraph) => {
         if (vaultUiGenerationRef.current === generation) setGraph(nextGraph);
       }).catch((error: unknown) => {
         if (vaultUiGenerationRef.current === generation) addToast("danger", "Graph could not be refreshed", error instanceof Error ? error.message : undefined);
       });
     }} onNavigate={navigateMemory} onEvidence={(id) => void openEvidence(id)} onEditTopic={setTopicEditor} />}
-    <SearchDialog open={searchOpen} demo={isDemo} onClose={() => setSearchOpen(false)} onSelect={selectSearchResult} />
-    <SettingsDialog open={settingsOpen} settings={settings} runtime={runtime} budget={currentBudget} pinnedCount={memories.filter((memory) => memory.pinned).length} onClose={() => setSettingsOpen(false)} onSave={updateSettings} onReset={openVaultReset} onOpenMemory={() => { setSettingsOpen(false); openMemoryInspector(); }} onProviderChanged={async () => { await Promise.all([bootstrapQuery.refetch(), budgetQuery.refetch()]); }} onVaultReplaced={async () => {
-      resetVaultScopedUiState();
-      const generation = vaultUiGenerationRef.current;
+    <SearchDialog key={`search-vault-${vaultUiGenerationRef.current}`} open={searchOpen} demo={isDemo} disabled={vaultReadsDisabled} onClose={() => setSearchOpen(false)} onSelect={selectSearchResult} />
+    <SettingsDialog key={`settings-vault-${vaultUiGenerationRef.current}`} open={settingsOpen} settings={settings} runtime={runtime} budget={currentBudget} pinnedCount={memories.filter((memory) => memory.pinned).length} onClose={() => setSettingsOpen(false)} onSave={updateSettings} onReset={openVaultReset} onOpenMemory={() => { setSettingsOpen(false); openMemoryInspector(); }} onProviderChanged={async () => { const refreshed = await bootstrapQuery.refetch(); if (!refreshed.isError && refreshed.data && refreshed.data.runtime.mode !== "offline") await budgetQuery.refetch(); }} onVaultReplaced={async (outcome = "confirmed") => {
+      const generation = await scrubCommittedDeletion({ clearSettings: true });
+      if (outcome === "ambiguous") {
+        if (vaultUiGenerationRef.current !== generation) return;
+        deletionScrubActiveRef.current = false;
+        setVaultRefreshFailed(true);
+        addToast("warning", "Import committed or may have committed", "The prior vault was scrubbed from this browser. Wait for local maintenance to finish, then reconnect to load one canonical snapshot.");
+        throw new Error("Import committed or may have committed. Wait for local maintenance to finish, then reconnect to load the canonical local state.");
+      }
       const refreshed = await bootstrapQuery.refetch();
       if (vaultUiGenerationRef.current !== generation) return;
-      await budgetQuery.refetch();
-      if (vaultUiGenerationRef.current !== generation) return;
-      if (refreshed.data) {
-        const next = refreshed.data;
-        const trace = next.debug.trace;
-        setEvents(next.events);
-        setEventsCursor(next.eventsNextCursor);
-        setTopics(next.topics);
-        setClaims(next.claims);
-        setMemories(next.activeMemories);
-        setMemoryProposals(next.memoryProposals);
-        setGraph(next.graph);
-        setDebugSnapshot(next.debug);
-        setSettings(next.settings);
-        setTracesByRunId(trace ? { [trace.runId]: trace } : {});
-        setReferencesByRunId(trace ? { [trace.runId]: next.activeMemories } : {});
-        setDebugByRunId(trace ? { [trace.runId]: next.debug } : {});
-        selectedRunIdRef.current = trace?.runId ?? null;
-        setSelectedRunId(trace?.runId ?? null);
-        const canOnboard = next.runtime.mode === "connected" || next.runtime.mode === "degraded";
-        setOnboardingOpen(!next.settings.onboardingComplete && canOnboard);
+      if (refreshed.isError || !refreshed.data) {
+        deletionScrubActiveRef.current = false;
+        setVaultRefreshFailed(true);
+        const prefix = "Import committed";
+        const error = refreshed.error instanceof Error
+          ? new Error(`${prefix}, but the canonical view needs to reconnect. ${refreshed.error.message}`)
+          : new Error(`${prefix}, but the canonical view needs to reconnect.`);
+        addToast("warning", `${prefix}, but the view needs to reconnect`, "The prior vault remains scrubbed from this browser.");
+        throw error;
       }
+      hydrateCanonicalVaultSnapshot(refreshed.data);
+      void budgetQuery.refetch();
       addToast("success", "Imported vault is ready");
     }} />
     <Onboarding open={onboardingOpen} onComplete={async (useDemo) => {
@@ -1563,7 +2235,7 @@ export function App() {
       await updateSettings({ onboardingComplete: true }, true);
       if (vaultUiGenerationRef.current !== generation) return;
       setOnboardingOpen(false);
-      if (useDemo) { const trace = demoBootstrap.debug.trace; setPreviewMode(true); setEvents(demoBootstrap.events); setEventsCursor(null); setTopics(demoBootstrap.topics); setClaims(demoBootstrap.claims); setMemories(demoBootstrap.activeMemories); setMemoryProposals(demoBootstrap.memoryProposals); setGraph(demoBootstrap.graph); setDebugSnapshot(demoBootstrap.debug); setTracesByRunId(trace ? { [trace.runId]: trace } : {}); setReferencesByRunId(trace ? { [trace.runId]: demoBootstrap.activeMemories } : {}); setDebugByRunId(trace ? { [trace.runId]: demoBootstrap.debug } : {}); setSelectedRunId(trace?.runId ?? null); }
+      if (useDemo) enterDemoPreview({ ...settings, onboardingComplete: true });
       addToast("success", useDemo ? "Demo preview opened" : "Continuum is ready");
     }} />
     <TopicDetailDialog topic={topicDetail} open={Boolean(topicDetail)} onClose={() => setTopicDetail(null)} onEdit={(topic) => { setTopicDetail(null); setTopicEditor(topic); }} onOpenEvidence={(id) => void openEvidence(id)} onOpenTopic={(identity) => void openTopicIdentity(identity)} onShowInGraph={(id) => void showInGraph(id)} />
@@ -1572,7 +2244,7 @@ export function App() {
     <ResponseRevisionsDialog open={Boolean(revisionEventId)} revisions={revisions} loading={revisionsLoading} error={revisionsError} onClose={() => setRevisionEventId(null)} onActivate={activateRevision} />
     <EvidenceDialog open={evidenceOpen} evidence={evidenceRecord} loading={evidenceLoading} error={evidenceError} onClose={() => { setEvidenceOpen(false); setEvidenceRecord(null); setEvidenceError(null); }} onOpenEvidence={openEvidence} onCorrectClaim={correctClaim} onDeleteClaim={(id, title) => { setEvidenceOpen(false); setEvidenceRecord(null); setEvidenceError(null); void requestDelete("claims", id, title); }} onReverseMerge={reverseEntityMerge} />
     <EntityMergeDialog open={mergeOpen} candidates={mergeCandidates} loading={mergeLoading} error={mergeError} onClose={() => setMergeOpen(false)} onReview={reviewEntityMerge} onMerge={mergeEntities} onReverse={(mergeId) => reverseEntityMerge(mergeId)} />
-    <ResetVaultDialog open={resetOpen} impact={vaultImpact} loading={vaultImpactLoading} error={vaultImpactError} onRetryImpact={loadVaultImpact} onClose={() => { setResetOpen(false); setVaultImpact(null); setVaultImpactError(null); }} onConfirm={async (impact) => { try { if (!isDemo) await continuumApi.destroyVault(impact.requiredPhrase, impact.confirmationToken); resetVaultScopedUiState(); setResetOpen(false); setVaultImpact(null); setOnboardingOpen(true); addToast("success", isDemo ? "Preview cleared" : "Vault destroyed"); } catch (error) { setVaultImpact(null); setVaultImpactError(error instanceof Error ? error.message : "The vault changed; calculate the impact again."); addToast("danger", "Vault was not destroyed", error instanceof Error ? error.message : undefined); } }} />
+    <ResetVaultDialog open={resetOpen} impact={vaultImpact} loading={vaultImpactLoading} error={vaultImpactError} onRetryImpact={loadVaultImpact} onClose={() => { setResetOpen(false); setVaultImpact(null); setVaultImpactError(null); }} onConfirm={confirmVaultReset} />
     <ToastRegion items={toasts} onDismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />
     {bootstrapQuery.isFetching && <div className="bootstrap-status" role="status"><span className="loading-ring" /> Connecting to the local vault…</div>}
   </div>;

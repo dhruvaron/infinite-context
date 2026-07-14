@@ -96,11 +96,12 @@ function normalizedShardProposalFixture(value: Fixture, marker: string): {
     authorType: "model",
     promptVersion: "topic-split-v2"
   });
+  const baseMarkdown = `# ${marker} current\n\n- existing active`;
   const base = value.database.upsertTopicRevision({
     type: "project",
     title: `${marker} current state 1`,
     slug: `${parent.id}-current-state-part-1`,
-    markdown: `# ${marker} current\n\n- existing active`,
+    markdown: baseMarkdown,
     summary: "Existing",
     currentState: "- existing active",
     history: "",
@@ -113,7 +114,7 @@ function normalizedShardProposalFixture(value: Fixture, marker: string): {
   value.database.connection.prepare(`
     INSERT INTO page_section_sources(id, revision_id, section_key, start_offset, end_offset, claim_id, source_id)
     VALUES (?, ?, 'current_state', 0, ?, ?, ?)
-  `).run(uuidv7(), baseRevisionId, base.markdown.length, existingClaim.id, existingSource.id);
+  `).run(uuidv7(), baseRevisionId, baseMarkdown.length, existingClaim.id, existingSource.id);
   const existingKey = `2026-07-14T09:00:00.000Z\u0000${existingClaim.id}`;
   value.database.connection.prepare(`
     INSERT INTO topic_projection_state(parent_topic_id, layout_version, mode, updated_at)
@@ -256,11 +257,12 @@ function disjointEvidenceProposal(value: Fixture, parentId: string, marker: stri
     observedAt: "2026-07-14T08:00:00.000Z",
     freshnessExpiresAt: null
   });
+  const baseMarkdown = `# ${marker} evidence\n\n- independent shard`;
   const base = value.database.upsertTopicRevision({
     type: "project",
     title: `${marker} evidence 1`,
     slug: `${parentId}-evidence-part-1`,
-    markdown: `# ${marker} evidence\n\n- independent shard`,
+    markdown: baseMarkdown,
     summary: "Evidence",
     currentState: "",
     history: "",
@@ -273,7 +275,7 @@ function disjointEvidenceProposal(value: Fixture, parentId: string, marker: stri
   value.database.connection.prepare(`
     INSERT INTO page_section_sources(id, revision_id, section_key, start_offset, end_offset, claim_id, source_id)
     VALUES (?, ?, 'evidence', 0, ?, ?, ?)
-  `).run(uuidv7(), baseRevisionId, base.markdown.length, claim.id, source.id);
+  `).run(uuidv7(), baseRevisionId, baseMarkdown.length, claim.id, source.id);
   const sortKey = `2026-07-14T08:00:00.000Z\u0000${claim.id}`;
   value.database.connection.prepare(`
     INSERT INTO topic_section_shards(child_topic_id, parent_topic_id, section_key, ordinal, min_sort_key, max_sort_key)
@@ -370,6 +372,8 @@ describe("product closure API", () => {
     const value = await fixture();
     const cancelAll = vi.spyOn(value.services.orchestrator, "cancelAll");
     try {
+      const before = await value.app.inject({ method: "GET", url: "/api/v1/vault/snapshot-boundary", headers: headers(value) });
+      expect(before.statusCode, before.body).toBe(200);
       const response = await value.app.inject({
         method: "POST",
         url: "/api/v1/export",
@@ -378,6 +382,10 @@ describe("product closure API", () => {
       });
       expect(response.statusCode, response.body).toBe(200);
       expect(cancelAll).not.toHaveBeenCalled();
+      const after = await value.app.inject({ method: "GET", url: "/api/v1/vault/snapshot-boundary", headers: headers(value) });
+      expect(after.statusCode, after.body).toBe(200);
+      expect(after.json()).toMatchObject({ maintenanceLocked: false, vaultId: expect.any(String) });
+      expect(after.json().generation).toBeGreaterThan(before.json().generation);
     } finally {
       cancelAll.mockRestore();
     }
@@ -429,6 +437,7 @@ describe("product closure API", () => {
     const urls = [
       "/api/v1/health",
       "/api/v1/runtime",
+      "/api/v1/vault/snapshot-boundary",
       "/api/v1/settings",
       "/api/v1/providers",
       "/api/v1/budget",
@@ -476,30 +485,40 @@ describe("product closure API", () => {
     const unknownId = uuidv7();
     const response = await value.app.inject({ method: "GET", url: `/api/v1/graph?focusId=${unknownId}&limit=50`, headers: headers(value) });
     expect(response.statusCode, response.body).toBe(404);
-    expect(response.json()).toMatchObject({ success: false, data: { error: { code: "GRAPH_FOCUS_NOT_FOUND" } } });
+    expect(response.json()).toMatchObject({ error: { code: "GRAPH_FOCUS_NOT_FOUND", retryable: false } });
   });
 
   it("keeps required privacy onboarding independent from the provider-key lifecycle", async () => {
     const value = await fixture();
+    let storedKey: string | null = null;
+    const getKey = vi.spyOn(value.services.providers.keychain, "getOpenAiApiKey").mockImplementation(async () => storedKey);
+    const setKey = vi.spyOn(value.services.providers.keychain, "setOpenAiApiKey").mockImplementation(async (key) => { storedKey = key; });
+    const deleteKey = vi.spyOn(value.services.providers.keychain, "deleteOpenAiApiKey").mockImplementation(async () => { storedKey = null; });
     value.database.setSetting("onboarding.complete", false);
-    const configured = await value.app.inject({
-      method: "POST",
-      url: "/api/v1/providers/openai-key",
-      headers: headers(value, true),
-      payload: { apiKey: "sk-test-onboarding-invariant-000000000000", idempotencyKey: "provider-key-onboarding-test" }
-    });
-    expect(configured.statusCode, configured.body).toBe(200);
-    expect(value.database.getSetting("onboarding.complete", false)).toBe(false);
+    try {
+      const configured = await value.app.inject({
+        method: "POST",
+        url: "/api/v1/providers/openai-key",
+        headers: headers(value, true),
+        payload: { apiKey: "sk-test-onboarding-invariant-000000000000", idempotencyKey: "provider-key-onboarding-test" }
+      });
+      expect(configured.statusCode, configured.body).toBe(200);
+      expect(value.database.getSetting("onboarding.complete", false)).toBe(false);
 
-    value.database.setSetting("onboarding.complete", true);
-    const removed = await value.app.inject({
-      method: "DELETE",
-      url: "/api/v1/providers/openai-key",
-      headers: headers(value, true),
-      payload: { idempotencyKey: "provider-key-removal-onboarding-test" }
-    });
-    expect(removed.statusCode, removed.body).toBe(200);
-    expect(value.database.getSetting("onboarding.complete", false)).toBe(true);
+      value.database.setSetting("onboarding.complete", true);
+      const removed = await value.app.inject({
+        method: "DELETE",
+        url: "/api/v1/providers/openai-key",
+        headers: headers(value, true),
+        payload: { idempotencyKey: "provider-key-removal-onboarding-test" }
+      });
+      expect(removed.statusCode, removed.body).toBe(200);
+      expect(value.database.getSetting("onboarding.complete", false)).toBe(true);
+    } finally {
+      getKey.mockRestore();
+      setKey.mockRestore();
+      deleteKey.mockRestore();
+    }
   });
 
   it("does not expose any operation that can renew the installation-lifetime budget", async () => {
@@ -725,6 +744,102 @@ describe("product closure API", () => {
     expect(value.database.getSetting("models.embedding", "missing")).toBe("text-embedding-3-large");
   });
 
+  it("applies settings batches atomically, rejects canonical alias collisions, and replays idempotently", async () => {
+    const value = await fixture();
+    value.database.appendEvent({ role: "user", content: "the existing corpus makes an embedding-model swap unsafe" });
+    const settingsBefore = value.database.listSettings();
+    const presetsBefore = value.database.connection.prepare(`
+      SELECT name, model_id AS modelId, updated_at AS updatedAt FROM provider_presets ORDER BY name
+    `).all();
+
+    const rejected = await value.app.inject({
+      method: "PUT",
+      url: "/api/v1/settings/batch",
+      headers: headers(value, true),
+      payload: {
+        mutations: [
+          { key: "theme", value: "dark" },
+          { key: "promptTracing.enabled", value: true },
+          { key: "models.response", value: { fast: "gpt-5.4-nano", balanced: "gpt-5.4-mini", deep: "gpt-5.4" } },
+          { key: "models.embedding", value: "text-embedding-3-large" }
+        ],
+        idempotencyKey: "atomic-settings-batch-rejected"
+      }
+    });
+    expect(rejected.statusCode, rejected.body).toBe(409);
+    expect(rejected.json()).toMatchObject({ error: { code: "EMBEDDING_MODEL_REINDEX_REQUIRED", retryable: false } });
+    expect(value.database.listSettings()).toEqual(settingsBefore);
+    expect(value.database.connection.prepare(`
+      SELECT name, model_id AS modelId, updated_at AS updatedAt FROM provider_presets ORDER BY name
+    `).all()).toEqual(presetsBefore);
+    expect(value.services.logger.promptTracingEnabled).toBe(false);
+    expect(value.database.connection.prepare(`
+      SELECT 1 FROM idempotency_keys WHERE key = ? AND operation = 'settings.batch.put'
+    `).get("atomic-settings-batch-rejected")).toBeUndefined();
+
+    const duplicateCanonical = await value.app.inject({
+      method: "PUT",
+      url: "/api/v1/settings/batch",
+      headers: headers(value, true),
+      payload: {
+        mutations: [{ key: "quality", value: "fast" }, { key: "quality.default", value: "deep" }],
+        idempotencyKey: "canonical-duplicate-settings-batch"
+      }
+    });
+    expect(duplicateCanonical.statusCode, duplicateCanonical.body).toBe(400);
+    expect(duplicateCanonical.json()).toMatchObject({ error: { code: "DUPLICATE_SETTING_MUTATION", retryable: false } });
+    expect(value.database.listSettings()).toEqual(settingsBefore);
+
+    const tracingSpy = vi.spyOn(value.services.logger, "setPromptTracing");
+    const responseModels = { fast: "gpt-5.4-nano", balanced: "gpt-5.4-mini", deep: "gpt-5.4" };
+    const payload = {
+      mutations: [
+        { key: "theme", value: "dark" },
+        { key: "promptTracingEnabled", value: true },
+        { key: "responseModelIds", value: responseModels }
+      ],
+      idempotencyKey: "successful-settings-batch"
+    };
+    const first = await value.app.inject({ method: "PUT", url: "/api/v1/settings/batch", headers: headers(value, true), payload });
+    expect(first.statusCode, first.body).toBe(200);
+    expect(first.json()).toMatchObject({
+      mutations: [
+        { key: "theme", value: "dark" },
+        { key: "promptTracing.enabled", value: true },
+        { key: "models.response", value: responseModels }
+      ],
+      settings: { theme: "dark", promptTracingEnabled: true, responseModelIds: responseModels }
+    });
+    expect(value.database.connection.prepare(`
+      SELECT name, model_id AS modelId FROM provider_presets ORDER BY name
+    `).all()).toEqual([
+      { name: "balanced", modelId: responseModels.balanced },
+      { name: "deep", modelId: responseModels.deep },
+      { name: "fast", modelId: responseModels.fast }
+    ]);
+    const replay = await value.app.inject({ method: "PUT", url: "/api/v1/settings/batch", headers: headers(value, true), payload });
+    expect(replay.statusCode, replay.body).toBe(200);
+    expect(replay.json()).toEqual(first.json());
+    expect(value.database.getSetting("theme", "missing")).toBe("dark");
+    expect(value.database.getSetting("promptTracing.enabled", false)).toBe(true);
+    expect(value.services.logger.promptTracingEnabled).toBe(true);
+    expect(tracingSpy).toHaveBeenCalledTimes(1);
+
+    await value.app.close();
+    const reopened = await buildApp({ config: value.config });
+    value.app = reopened.app;
+    value.services = reopened.services;
+    value.database = reopened.services.database;
+    expect(value.database.getSetting("models.response", null)).toEqual(responseModels);
+    expect(value.database.connection.prepare(`
+      SELECT name, model_id AS modelId FROM provider_presets ORDER BY name
+    `).all()).toEqual([
+      { name: "balanced", modelId: responseModels.balanced },
+      { name: "deep", modelId: responseModels.deep },
+      { name: "fast", modelId: responseModels.fast }
+    ]);
+  });
+
   it("returns answer-specific packet, tool, cache, and version diagnostics", async () => {
     const value = await fixture();
     const user = value.database.appendEvent({ role: "user", content: "debug this answer" });
@@ -801,7 +916,7 @@ describe("product closure API", () => {
       },
       modelCalls: [{ model: "fixture-model", cachedInputTokens: 60, traceMetadata: { cachedInputTokens: 60 } }],
       toolCalls: [{ toolName: "execute_code", arguments: { language: "javascript" }, sandbox: { backend: "macos-sandbox-exec" } }],
-      versions: { schemaVersion: "11", retrievalVersion: "retrieval-v1", promptVersions: expect.arrayContaining([expect.objectContaining({ semanticVersion: "response-v1" })]) }
+      versions: { schemaVersion: "18", retrievalVersion: "retrieval-v1", promptVersions: expect.arrayContaining([expect.objectContaining({ semanticVersion: "response-v1" })]) }
     });
   });
 
@@ -1208,5 +1323,19 @@ describe("product closure API", () => {
     expect(value.database.getSetting<unknown[]>("memory.pendingTopicProposals", [])).toEqual([]);
     expect(value.database.getSetting<Array<{ status: string }>>("memory.resolvedTopicProposals", []).map((item) => item.status)).toEqual(["rejected"]);
     expect(value.database.connection.prepare("SELECT 1 FROM topic_page_revisions WHERE id = ?").get(firstRevisionId)).toBeUndefined();
+    const rebuild = value.database.connection.prepare(`
+      SELECT type, payload_json AS payloadJson, status, priority FROM jobs WHERE idempotency_key = ?
+    `).get(stableHash(`memory.rebuild:legacy-proposal-reject:${proposal.id}`)) as {
+      type: string;
+      payloadJson: string;
+      status: string;
+      priority: number;
+    } | undefined;
+    expect(rebuild).toMatchObject({ type: "memory.rebuild", status: "queued", priority: 20 });
+    expect(JSON.parse(rebuild!.payloadJson)).toEqual({
+      topicIds: [topic.id],
+      reason: "legacy_topic_proposal_reject",
+      proposalId: proposal.id
+    });
   });
 });

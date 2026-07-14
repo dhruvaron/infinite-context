@@ -2,7 +2,7 @@
 
 Release verdict: **NOT ACCEPTED**.
 
-The current source schema is 17. The installed dependency state was unusable during the 2026-07-14 hardening audit, and dependency restoration was not authorized, so no package-level typecheck, lint, contract, unit/integration, build, native-ingestion, macOS-sandbox, Playwright, load, or evaluation command ran on this revision. Source-only syntax/hygiene checks, artifact-hash verification, and raw SQLite migration smoke may be reported separately when completed, but they are not substitutes for the gates below. Recorded provider/API spend remains **USD 0.00**; no paid or normal-provider call was made.
+The current source schema is 18. With locked dependencies restored under Node 22, this hardening tree passed all-workspace typecheck, root lint, contract drift, conflict hygiene, 50 Vitest files with 470 tests, the production build, the native-ingestion smoke, the real macOS sandbox smoke, the static security audit, and all 26 executable Chromium/Firefox/WebKit journeys with 10 intentional browser-independent skips. Load and evaluation artifacts have not been regenerated. These are local current-tree results, not a frozen CI, fresh-checkout, live-provider, or competitor result. Recorded provider/API spend remains **USD 0.00**; no paid or normal-provider call was made.
 
 ## Local release gates
 
@@ -26,13 +26,29 @@ pnpm eval:no-cost
 
 The root Vitest configuration separates Node tests from jsdom web tests. Shared API drift is checked independently: `contracts:check` inventories every public route, requires every section-11 resource group, verifies mutation idempotency and list pagination declarations, and rejects unversioned SSE frames.
 
-## Historical pre-schema-17 local evidence
+## Current schema-18 local evidence
 
-The exact results and hashes below are retained as historical evidence from an earlier uncommitted/pre-hardening tree. They are not current-revision passes and must be regenerated from a frozen schema-17 revision.
+- `pnpm typecheck`: passed across all workspaces under Node 22.
+- `pnpm lint`: passed at the repository root.
+- `pnpm contracts:check`: passed with **81 public routes across all 26 section-11 resource groups**.
+- Conflict hygiene: passed.
+- `pnpm test`: passed **50 files and 470 tests**.
+- `pnpm build`: passed. Vite emitted a non-fatal warning for a generated browser chunk larger than 500 kB; this is a performance follow-up, not a build failure.
+- `pnpm audit:security`: passed with **0 findings**.
+- `pnpm test:native-ingestion`: passed with the real local Apple Vision/PDFKit helper available.
+- `pnpm test:macos-sandbox`: passed against the real macOS `sandbox-exec` backend for JavaScript/Python environment, filesystem, network, wall-time, output, and memory boundaries.
+- `pnpm test:e2e`: passed all **26 executable journeys** across Chromium, Firefox, and WebKit with **10 intentional skips** for five browser-independent backend scenarios repeated only in Chromium. The final WebKit product pass was rerun after stabilizing an engine-specific stale-paint assertion.
+- `pnpm load:full` and `pnpm eval:no-cost`: not regenerated on schema 18.
+
+The Vitest result includes current local regression coverage for context-packet reconstruction, deletion and maintenance recovery, import exact-once behavior, schema-18 migration repair, embeddings and projection generation-token CAS, normalized confirmation proposals, browser bootstrap/settings/demo boundaries, and observability redaction. It does not replace fresh-checkout, frozen load, or live-provider evidence.
+
+## Historical predecessor-tree evidence
+
+The exact results and hashes below are retained as historical evidence from an earlier uncommitted/pre-hardening tree. They are not schema-18 results and must be regenerated from a frozen schema-18 revision before they can represent the current implementation.
 
 ### Browser and process journeys
 
-The historically observed no-cost Playwright command result was **26 passed, 10 intentionally skipped, 0 failed** across Chromium, Firefox, and WebKit. This is predecessor-tree automated output; generated Playwright reports were removed after that pass, so this document does not present it as a durable manual/in-app browser-QA artifact or a schema-17 result.
+Current schema-18 browser validation reached **26 passed, 10 intentionally skipped, 0 failed** across Chromium, Firefox, and WebKit. Chromium and Firefox completed in the full matrix; WebKit's backend reliability journeys completed there and all six WebKit product journeys passed in the final rerun after the stale-paint stabilization. This is automated local evidence, not a manual accessibility audit or frozen CI artifact.
 
 | Coverage class | Chromium | Firefox | WebKit | Total |
 |---|---:|---:|---:|---:|
@@ -40,7 +56,7 @@ The historically observed no-cost Playwright command result was **26 passed, 10 
 | Browser-independent workspace, sandbox, memory mutation, API crash, and worker crash boundaries | 5 passed | 5 intentional skips | 5 intentional skips | 5 passed, 10 skipped |
 | Overall | 12 passed | 7 passed, 5 skipped | 7 passed, 5 skipped | **26 passed, 10 skipped, 0 failed** |
 
-In that historical run, the skipped cases were browser-independent backend scenarios deliberately executed once in Chromium to avoid mutating the shared serial fixture three times. The cancellation path and every user-facing journey ran in all three engines. Current browser behavior remains unverified until Playwright is rerun.
+The skipped cases are browser-independent backend scenarios deliberately executed once in Chromium to avoid mutating the shared serial fixture three times. The cancellation path and every user-facing journey ran in all three engines.
 
 `tests/e2e/mock-smoke.spec.ts` covers:
 
@@ -60,22 +76,23 @@ In that historical run, the skipped cases were browser-independent backend scena
 - hard API crash/restart reconciliation without duplicate events/runs/stream records, including a second restart;
 - worker crash, expired-lease reclamation, exactly-once derived vector state, idempotent reseeding, and a second restart.
 
-The E2E supervisor is configured to use `.continuum/playwright`, a mock provider, fixed loopback ports, a dedicated session token, and test-only process controls that are not product routes. The reliability journeys assert the application budget remains at USD 0; those assertions were not rerun on schema 17.
+The E2E supervisor is configured to use `.continuum/playwright`, a mock provider, fixed loopback ports, a dedicated session token, and test-only process controls that are not product routes. The reliability journeys assert the application budget remains at USD 0.
 
 ### Safety, security, and contracts
 
-- Historical `pnpm audit:security`: **0 findings**. The audit checks provider storage, browser secret persistence, raw HTML, shell execution, wildcard CORS, and API-key literals; dependency, VCS, build, and coverage paths are excluded. It was not rerun on schema 17.
-- Historical `pnpm test:macos-sandbox`: the real macOS `sandbox-exec` backend passed JavaScript and Python environment, filesystem, network, wall-time, output, and memory boundaries. The script fails rather than skips when the required backend is unavailable; the current tree has no result.
-- Historical `pnpm contracts:check`: **77 public routes across all 26 section-11 groups**. Shared Zod request/response contracts, generated types, server response enforcement, web runtime parsing, stable error envelopes, and versioned SSE have test source in `packages/contracts/src/api.test.ts` and `apps/api/src/product-closure.test.ts`. Migration 16 introduced normalized topic-shard proposal contracts; current schema-17 drift must be rerun.
-- Context packet privacy/integrity test source in `apps/api/src/context-packets.test.ts` checks reference-only composition, exact reconstruction, and stale/missing-body refusal. Its predecessor-tree result is historical.
-- Deletion test source covers claim, attachment, event, topic, downstream answer, run derivative, graph/page-link, vector, search, and shared-evidence cases. Current maintenance tests additionally target closed mutation admission, fail-closed post-commit cleanup, durable recovery metadata, projection/CAS cleanup, backup scrubbing, secure purge, and whole-vault marker replay. None ran on the schema-17 tree.
-- Embedding test source targets exact-model search isolation, exact source-generation jobs, no-cost reuse of a current vector, stale completion races, inactive-source cleanup, and refusal to change the configured embedding model after any embeddable corpus or embedding work exists. Projection tests target generation-plus-repair-token CAS, including a newer concurrent dirty pair surviving an older repair and a deleted/reinserted generation-1 marker receiving a nonreused leaseable rebuild-job identity. Proposal tests target normalized guarded acceptance, one-time protected inline-to-sharded conversion, and refusal to accept unguarded legacy proposals. None of these package tests ran on the schema-17 tree.
-- Observability test source in `packages/observability/src/observability.test.ts` checks default content redaction, credential stripping even in trace mode, runtime consent changes, serialized writes, flush, and size rotation. It was not rerun on schema 17.
+- Current `pnpm audit:security`: **0 findings**. The audit checks provider storage, browser secret persistence, raw HTML, shell execution, wildcard CORS, and API-key literals; dependency, VCS, build, and coverage paths are excluded.
+- Current `pnpm test:macos-sandbox`: passed on the real macOS `sandbox-exec` backend for JavaScript/Python environment, filesystem, network, wall-time, output, and memory boundaries. The script fails rather than skips when the required backend is unavailable.
+- Current `pnpm contracts:check`: **81 public routes across all 26 section-11 groups**. Shared Zod request/response contracts, generated types, server response enforcement, web runtime parsing, stable error envelopes, and versioned SSE are exercised by the current contract and API tests. The predecessor tree's 77-route result remains historical only.
+- Current Vitest coverage checks reference-only context-packet composition, exact reconstruction, and stale/missing-body refusal.
+- Current deletion and maintenance tests cover transitive resource cascades, closed mutation admission, fail-closed precommit rollback cleanup and post-commit cleanup, durable recovery metadata, projection/CAS cleanup, backup scrubbing, secure purge, whole-vault marker replay, and import-token exact-once recovery. Passing local fault injection is not a forensic secure-erasure guarantee or a fresh-process E2E result.
+- Current embedding/projection/proposal tests cover exact-model and exact-generation isolation, no-cost reuse, stale completion races, inactive-source cleanup, embedding-model immutability, generation-plus-repair-token CAS, nonreused rebuild-job identities, normalized guarded acceptance, protected inline-to-sharded conversion, and reject-only legacy proposals with queued recompilation.
+- Current web/API tests and browser journeys cover all-or-nothing core bootstrap, before/after vault-generation fencing, read-only last-verified retention, offline Search/Graph closure, exact demo snapshot restoration, deletion/import stream-and-cache invalidation, newest-run retry recovery, atomic settings persistence, durable provider-preset seeding, and ambiguous-import recovery.
+- Current observability tests cover default content redaction, credential stripping even in trace mode, write-time durable consent lookup for the independent worker, lookup-failure redaction, serialized writes, flush, and size rotation.
 
 ### Long-session and evaluation evidence
 
 - `artifacts/evaluation/no-cost/summary.json`: exact seeded InfiniteBuild fixture with 10,000 messages, USD 0 recorded cost, configuration hash `f4d5ebbb21ea84ac9072dce3d3be5d2af3c059ee2ea4fa511138e49a92f6622f`, and result hash `58ec69f914138da8a5b8775d261c612b6891f0d1cfa7fc6255bcdd383464af65`. It still misses the frozen relative-accuracy gate: 8.7% versus 15%.
-- `artifacts/evaluation/load-full.json`: schema 11, native `sqlite-vec` v0.1.9 exact cosine mode, 100,000 events, 10,000 topics, integrity `ok`, 4.029 ms recorded local search p95, and 0.171 ms timeline-page p95. File SHA-256: `fc869b23bc2d55723a91d273414c98aae560dc0239c081a2360f8256e2ba8e4d`. Current source is schema 17, so this is historical storage/search evidence only: it proves neither current migration compatibility nor current integrity/performance, model recall, or interactive ingestion latency.
+- `artifacts/evaluation/load-full.json`: schema 11, native `sqlite-vec` v0.1.9 exact cosine mode, 100,000 events, 10,000 topics, integrity `ok`, 4.029 ms recorded local search p95, and 0.171 ms timeline-page p95. File SHA-256: `fc869b23bc2d55723a91d273414c98aae560dc0239c081a2360f8256e2ba8e4d`. Current source is schema 18, so this is historical storage/search evidence only: it proves neither current migration compatibility nor current integrity/performance, model recall, or interactive ingestion latency.
 - Local ignored LongMemEval import (`.continuum/evaluation-imports/longmemeval-oracle/import-manifest.json`): all 500 oracle records, 10,960 messages, and 500 probes normalized from registry-verified MIT source bytes. Normalized SHA-256: `b75be49d51d2cd67901c80b687e66dfc863c759e83e0ef6a831f3c9fff32aab1`.
 - Local ignored bounded LongMemEval diagnostic (`.continuum/evaluation-diagnostics/longmemeval-oracle-bounded-no-cost/report.md`): one record/probe/repetition, four controlled modes, full plus six real production feature removals, zero live calls, USD 0. It is explicitly ineligible and is only production-path wiring evidence.
 - `artifacts/evaluation/causal/infinite-build-10k-diagnostic/causal-result.json`: complete exact InfiniteBuild 10k production-path diagnostic with 43 probes, four modes, full plus six real production feature-removal configurations, 172 controlled runs, 301 ablation runs, zero errors, and USD 0. Internal hashes: result `d6864864cdc6ce42ef884dc20fdd1527f9255b9f04e9fad6aa5a9fa156033026`, controlled runs `d822fc0fc09c32d0b5e9aa030fbc6cda66985a800171ade7c63597639f25f590`, ablation runs `d07b0c79b0381c9fa947c168e5dc9c822c892e6fe802ebe770be0cb55ded6803`, dataset `f66cd208fa74fedc7ae2d53babeb04f932a82960c8fec111d2d51a08aeedb042`, and generator `8fe1510bdd60342ee90f8d8f56da1d831e186b290bb45dca41d040f5e56f2422`.
@@ -88,7 +105,7 @@ HaluMem is not project test evidence. The project records its registry metadata 
 
 ### Historical compiler performance red-team
 
-Current source scopes each `memory.compile` job to its explicit `sourceEventIds` instead of repeatedly treating accumulated history as new evidence. The following focused deterministic results were recorded on predecessor-tree stages with batch size 32 and embeddings off; they were not rerun on schema 17:
+Current source scopes each `memory.compile` job to its explicit `sourceEventIds` instead of repeatedly treating accumulated history as new evidence. The following focused deterministic results were recorded on predecessor-tree stages with batch size 32 and embeddings off; the performance profiles were not regenerated on schema 18:
 
 | Profile | Time | Claims | Topics | Compiler invocations | Interpretation |
 |---|---:|---:|---:|---:|---|
@@ -96,7 +113,7 @@ Current source scopes each `memory.compile` job to its explicit `sourceEventIds`
 | Same 1,000 messages after the fix | 583 ms | 23 | 6 | 32 | About 153.5× (~154×) faster in this observed profile, with duplicate reprocessing removed. |
 | Standard InfiniteBuild 10,000, later compiler-only smoke | 4,393 ms | 15 | 6 | 313 | Fast sparse-durable fixture after mock-attribution tightening; this is not a dense-fact or current-revision result. |
 
-These values are focused test/profile output, not a durable hashed performance artifact, cross-machine benchmark, or universal speedup claim. A distinct earlier 10,000-message compiler-only profile recorded 5,130 ms, 28 claims, and 6 topics. Because the revision and attribution configuration differ, neither 10k observation is a canonical result. `apps/worker/src/processor.test.ts` contains structural regression source, but that test has not run on schema 17.
+These values are focused test/profile output, not a durable hashed performance artifact, cross-machine benchmark, or universal speedup claim. A distinct earlier 10,000-message compiler-only profile recorded 5,130 ms, 28 claims, and 6 topics. Because the revision and attribution configuration differ, neither 10k observation is a canonical result. Current worker structural regressions passed within the 50-file/470-test Vitest run, but that does not regenerate either historical profile.
 
 An earlier intermediate full-path profile, before the later attribution and page-local changes, took 29,941 ms and produced 10,034 mock vectors/jobs at USD 0. It is retained only as diagnostic history and is not comparable to either compiler-only observation.
 
@@ -109,7 +126,7 @@ The historical red-team found severe write amplification on adversarial-but-vali
 
 Before the historical page-local fix, doubling the input produced about 8.9× wall time; after it, the observed increase was about 2.46× and the 512-turn case was about 10× faster. A historical 256-plus-32 locality probe retained all 38 existing topic IDs, revised only 6 existing pages, added 5 pages and 11 revisions, kept all 288 source IDs in active provenance, and passed SQLite integrity checking.
 
-Those results show reduced historical persistent-I/O amplification, not a true O(delta) compiler. Current source has normalized, fingerprint-guarded `topic_shard_patch` proposals whose planner is bounded to changed-claim memberships and touched shards for confirmation-only sharded topics, plus a normalized one-time conversion for a protected inline topic. Those source paths remain current-validation-pending and do not make the automatic, conversion, rebuild, proposal-resolution, or end-to-end compiler O(delta). The exact historical 10k fixture shows a long sparse-durable session path, not scalability to thousands of genuine facts. Dense-durable compilation remains an acceptance risk until frozen 1k/5k/10k profiles establish practical bounds and invariant output semantics.
+Those results show reduced historical persistent-I/O amplification, not a true O(delta) compiler. Current source has locally tested normalized, fingerprint-guarded `topic_shard_patch` proposals whose planner is bounded to changed-claim memberships and touched shards for confirmation-only sharded topics, plus a normalized one-time conversion for a protected inline topic. Local regression coverage does not make the automatic, conversion, rebuild, proposal-resolution, or end-to-end compiler O(delta). The exact historical 10k fixture shows a long sparse-durable session path, not scalability to thousands of genuine facts. Dense-durable compilation remains an acceptance risk until frozen 1k/5k/10k profiles establish practical bounds and invariant output semantics.
 
 ## CI
 
@@ -120,7 +137,7 @@ Those results show reduced historical persistent-I/O amplification, not a true O
 - Deterministic evaluation and quick-load evidence, uploaded separately.
 - macOS Node 22 typecheck, contract drift, unit tests, native ingestion, non-skippable OS sandbox smoke, and build.
 
-These are workflow definitions, not a current CI outcome. No schema-17 CI run is claimed in this reconciliation.
+These are workflow definitions, not a current CI outcome. No schema-18 CI run is claimed in this reconciliation.
 
 Live OpenAI evaluation and manual black-box competitor operation never run automatically on pull requests. They require explicit reviewed invocation, protected credentials, all live/paid acknowledgement flags, and the shared durable budget ledger.
 
@@ -128,16 +145,14 @@ Live OpenAI evaluation and manual black-box competitor operation never run autom
 
 The available suite source and historical results do not substitute for these current-revision, external, or release-bound records:
 
-- One complete single-revision run of all root gates after the schema-17 release revision is frozen, including regeneration of 10k/100k artifacts. The 100k artifact must identify schema 17 rather than reusing the historical schema-11 result.
-- Focused current-revision proposal coverage for normalized persistence/replay, topicless claims, protected inline-to-sharded conversion, current-to-history atomic patches, split/archive behavior, disjoint acceptance order, exact claim/evidence/route/content guards, legacy accept refusal, stale-CAS zero mutation, candidate FTS/graph/file isolation, rejection, crash recovery, and projection/embedding follow-up jobs.
-- Focused current-revision projection repair and embedding coverage for concurrent dirty generation-token pairs, exact-pair CAS clearing, delete/reinsert generation-1 job-identity uniqueness, lease/crash/retry progress, exact-model retrieval, exact-generation job preflight and completion, no-cost vector reuse, stale completion isolation, inactive-source cleanup, and embedding-model immutability once an embeddable corpus exists. A future model-change workflow must be separately specified and tested with a cost preview, resumable migration, and final corpus validation.
-- Focused current-revision deletion and maintenance fault injection covering admission drain, every post-commit cleanup step, nested topic/run cascades, CAS and projection fsync, managed-backup scrubbing, secure purge, idempotent repeated restart recovery, and the external whole-vault marker.
-- Focused current-revision source replay coverage proving exact re-extraction is idempotent and changed source bytes remove stale derived claims, indexes, vectors, projections, and topic content before rebuild.
+- One complete single-revision run of all root gates after the schema-18 release revision is frozen, including regenerated 10k/100k artifacts. The 100k artifact must identify schema 18 rather than reusing the historical schema-11 result.
+- Fresh-process restart evidence for bootstrap generation changes, import rollback/post-commit recovery, deletion cache non-resurrection, worker lease recovery, and exact idempotent response replay. Current local unit/integration fault injection is necessary but not sufficient for this record.
+- A future embedding-model transition workflow with a complete cost preview, resumable migration, and final corpus validation. Current schema 18 intentionally refuses the change once an embeddable corpus or embedding work exists.
 - A genuinely fresh macOS checkout startup and authenticated onboarding record, including real Keychain save/read/delete and proof that the key never reaches browser state, logs, SQLite, or exports.
 - A complete paid causal run that combines registry-verified LongMemEval and the exact InfiniteBuild 10k source, all four modes, all seven production configurations, three repetitions, a distinct judge, and a completed bound human audit.
 - Matched validated ChatGPT and Codex manual captures under the frozen visible protocol.
 - A normal-provider first-token and post-turn compiled-memory-searchability artifact with complete samples and application-ledger deltas.
 - Resolution or explicit continued disclosure of the deterministic 15% relative-accuracy gate miss.
-- A durable dense-durable compiler profile at 1k, 5k, and 10k genuine facts with bounded latency/memory and invariant output semantics. Include automatic, confirmation-only sharded planning, protected inline conversion, proposal resolution, and rebuild paths; the historical 256/512 profile and unrun schema-17 planner do not establish full-compiler O(delta) behavior.
+- A durable dense-durable compiler profile at 1k, 5k, and 10k genuine facts with bounded latency/memory and invariant output semantics. Include automatic, confirmation-only sharded planning, protected inline conversion, proposal resolution, and rebuild paths; the historical 256/512 profile and locally unit-covered but unprofiled schema-18 planner do not establish full-compiler O(delta) behavior.
 
 Every report must identify its fixture, environment, date, revision, configuration hash, provider-call count, and cost. A skipped live suite is **not measured**, never passed. A mock, deterministic, bounded, or incomplete result must keep its evidence-class label and cannot support a product-superiority or live-latency claim.

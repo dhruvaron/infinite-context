@@ -55,6 +55,45 @@ describe("inspectable memory controls", () => {
     expect(database.claimTopicIdsForSlot("project   name", "is named")).toEqual([topicId]);
     expect(database.connection.prepare("EXPLAIN QUERY PLAN SELECT claim_id FROM claim_slot_index WHERE subject_key = ? AND predicate_key = ?").all("project name", "is named"))
       .toEqual(expect.arrayContaining([expect.objectContaining({ detail: expect.stringContaining("claim_slot_lookup_idx") })]));
+
+    const movedTopicId = uuidv7();
+    database.connection.prepare("UPDATE claims SET topic_id = ?, status = 'conflicted' WHERE id = ?").run(movedTopicId, claim.id);
+    expect(database.connection.prepare("SELECT subject_key, predicate_key, topic_id, status FROM claim_slot_index WHERE claim_id = ?").get(claim.id)).toEqual({
+      subject_key: "project name",
+      predicate_key: "is named",
+      topic_id: movedTopicId,
+      status: "conflicted"
+    });
+    expect(database.listActiveClaimsForSlot("project name", "is named", movedTopicId)).toEqual([expect.objectContaining({ id: claim.id })]);
+    expect(database.claimTopicIdsForSlot("project name", "is named")).toEqual([movedTopicId]);
+
+    // SQLite fires UPDATE OF triggers when a column is named in SET, even if
+    // its value is unchanged. These no-op assignments must not downgrade keys.
+    database.connection.prepare("UPDATE claims SET subject = subject, predicate = predicate, status = 'current' WHERE id = ?").run(claim.id);
+    expect(database.connection.prepare("SELECT subject_key, predicate_key FROM claim_slot_index WHERE claim_id = ?").get(claim.id)).toEqual({
+      subject_key: "project name",
+      predicate_key: "is named"
+    });
+
+    // Supported subject/predicate mutations go through upsertClaim, whose
+    // application normalizer updates the exact keys in the same transaction.
+    database.upsertClaim({
+      id: claim.id,
+      topicId: movedTopicId,
+      subject: "ＮＥＷ\u3000Project",
+      predicate: "HAS\t  LABEL",
+      value: claim.value,
+      confidence: claim.confidence,
+      status: "current",
+      sourceRole: claim.sourceRole,
+      sourceIds: claim.sourceIds,
+      validFrom: claim.validFrom,
+      validTo: claim.validTo,
+      observedAt: claim.observedAt,
+      freshnessExpiresAt: claim.freshnessExpiresAt
+    });
+    expect(database.listActiveClaimsForSlot("new project", "has label", movedTopicId)).toEqual([expect.objectContaining({ id: claim.id })]);
+    expect(database.listActiveClaimsForSlot("project name", "is named", movedTopicId)).toEqual([]);
   });
 
   it("does not let historical-only topics hide the current topic in the bounded slot summary", async () => {
@@ -205,7 +244,8 @@ describe("inspectable memory controls", () => {
     expect(database.connection.prepare("SELECT COUNT(*) AS count FROM topic_section_shards WHERE parent_topic_id = ?").get(parent.id))
       .toEqual({ count: 0 });
     expect(database.connection.prepare("SELECT mode FROM topic_projection_state WHERE parent_topic_id = ?").get(parent.id)).toBeUndefined();
-    expect(database.getTopic(first.id)?.lifecycleStatus).toBe("active");
+    expect(database.connection.prepare("SELECT lifecycle_status FROM topic_pages WHERE id = ?").get(first.id))
+      .toEqual({ lifecycle_status: "active" });
 
     for (const malformedTags of ["{", JSON.stringify(`parent:${parent.id}`), JSON.stringify({ parent: parent.id })]) {
       database.connection.prepare("UPDATE topic_pages SET tags_json = ? WHERE id = ?").run(malformedTags, first.id);

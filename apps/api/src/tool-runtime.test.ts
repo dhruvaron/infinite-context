@@ -229,7 +229,11 @@ describe("LocalToolRuntime", () => {
     expect(database.graph(dynamicallyExpired.id, 50, 1, true).nodes).toContainEqual(expect.objectContaining({ id: dynamicallyExpired.id, status: "expired" }));
 
     const chunks = await call("search_memory", { query: "chunk-evidence-canary", filters: { types: ["source"] }, limit: 20 });
-    expect(chunks).toContainEqual(expect.objectContaining({ id: sourceId, sourceIds: expect.arrayContaining([sourceId, targetChunkId]), location: { evidenceId: targetChunkId } }));
+    expect(chunks).toContainEqual(expect.objectContaining({
+      id: sourceId,
+      sourceIds: expect.arrayContaining([sourceId, targetChunkId]),
+      location: expect.objectContaining({ evidenceId: targetChunkId })
+    }));
 
     const trace = await call("trace_claim", { claimId: current.id });
     expect(trace).toContainEqual(expect.objectContaining({ id: conflicted.id, type: "claim", location: expect.objectContaining({ relationType: "contradicts" }) }));

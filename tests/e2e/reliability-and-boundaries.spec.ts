@@ -33,7 +33,7 @@ test.describe.serial("no-cost reliability and boundary journeys", () => {
     expect(seeded).not.toBeNull();
     const run = await apiGet(page.request, `/runs/${seeded!.runId}`);
     expect(run.status).toBe("cancelled");
-    expect(run.cancellation_requested).toBe(1);
+    expect(run.cancellationRequested).toBe(true);
     const retry = await apiPost(page.request, `/runs/${seeded!.runId}/cancel`, { idempotencyKey: idempotency("stop-again") });
     expect(retry.cancelled).toBe(false);
     await page.unroute("**/api/v1/messages");

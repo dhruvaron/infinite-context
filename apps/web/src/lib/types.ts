@@ -22,6 +22,7 @@ import type {
   SecretApproval as ContractSecretApproval,
   ThemePreference as ContractThemePreference,
   TopicDetail as ContractTopicDetail,
+  VaultSnapshotBoundary as ContractVaultSnapshotBoundary,
   VaultDeletionImpact as ContractVaultDeletionImpact,
   Workspace as ContractWorkspace
 } from "@continuum/contracts/api";
@@ -164,13 +165,26 @@ export type ActiveRun = {
   createdAt?: string;
 };
 
+export type FailedRun = {
+  id: string;
+  status: "failed";
+  userEventId: string | null;
+  assistantEventId: string | null;
+  errorCode: string | null;
+  createdAt?: string;
+  completedAt?: string | null;
+};
+
 export type BootstrapData = {
+  /** Exact server fence used to prove that every bootstrap read came from one vault maintenance generation. */
+  vaultBoundary: ContractVaultSnapshotBoundary;
   runtime: RuntimeState;
   settings: AppSettings;
   budget: BudgetSummary;
   events: ConversationEvent[];
   eventsNextCursor: string | null;
   activeRuns: ActiveRun[];
+  latestFailedRun: FailedRun | null;
   topics: TopicPage[];
   claims: Claim[];
   graph: GraphResponse;

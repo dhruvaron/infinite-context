@@ -96,6 +96,12 @@ export const RuntimeStateSchema = z.object({
   privacy: z.object({ storedLocally: z.boolean(), providerStorageDisabled: z.boolean(), analytics: z.boolean() }).optional()
 }).passthrough();
 
+export const VaultSnapshotBoundarySchema = z.object({
+  generation: z.number().int().nonnegative(),
+  maintenanceLocked: z.boolean(),
+  vaultId: IdSchema.nullable()
+}).strict();
+
 export const ThemePreferenceSchema = z.enum(["light", "dark", "system"]);
 export const ResponseModelIdsSchema = z.object({
   fast: z.string().min(1).max(200),
@@ -129,9 +135,35 @@ export const SettingMutationRequestSchema = z.object({
   value: z.unknown(),
   idempotencyKey: IdempotencyKeySchema
 });
+export const SettingBatchMutationRequestSchema = z.object({
+  mutations: z.array(z.object({
+    key: SettingKeySchema,
+    value: z.unknown()
+  })).min(1).max(32).superRefine((mutations, context) => {
+    const firstIndexByKey = new Map<string, number>();
+    mutations.forEach((mutation, index) => {
+      const firstIndex = firstIndexByKey.get(mutation.key);
+      if (firstIndex === undefined) {
+        firstIndexByKey.set(mutation.key, index);
+        return;
+      }
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [index, "key"],
+        message: `Setting key ${mutation.key} is duplicated (first used at index ${firstIndex}).`
+      });
+    });
+  }),
+  idempotencyKey: IdempotencyKeySchema
+});
 export const SettingMutationResponseSchema = z.object({
   key: z.string(),
   value: z.unknown(),
+  settings: AppSettingsSchema,
+  raw: z.record(z.unknown())
+});
+export const SettingBatchMutationResponseSchema = z.object({
+  mutations: z.array(z.object({ key: SettingKeySchema, value: z.unknown() })).min(1).max(32),
   settings: AppSettingsSchema,
   raw: z.record(z.unknown())
 });
@@ -547,8 +579,10 @@ const route = <const Contract extends PublicApiContract>(contract: Contract) => 
 export const PUBLIC_API_CONTRACTS = [
   route({ id: "health.get", group: "health", method: "GET", path: "/api/v1/health", response: HealthResponseSchema }),
   route({ id: "runtime.get", group: "runtime", method: "GET", path: "/api/v1/runtime", response: RuntimeStateSchema }),
+  route({ id: "vault.snapshot-boundary", group: "vault", method: "GET", path: "/api/v1/vault/snapshot-boundary", response: VaultSnapshotBoundarySchema }),
   route({ id: "settings.get", group: "settings", method: "GET", path: "/api/v1/settings", response: SettingsResponseSchema }),
   route({ id: "settings.put", group: "settings", method: "PUT", path: "/api/v1/settings", request: { body: SettingMutationRequestSchema }, response: SettingMutationResponseSchema, mutation: true }),
+  route({ id: "settings.batch.put", group: "settings", method: "PUT", path: "/api/v1/settings/batch", request: { body: SettingBatchMutationRequestSchema }, response: SettingBatchMutationResponseSchema, mutation: true }),
   route({ id: "providers.list", group: "providers", method: "GET", path: "/api/v1/providers", response: ProvidersResponseSchema }),
   route({ id: "providers.key.set", group: "providers", method: "POST", path: "/api/v1/providers/openai-key", request: { body: SetProviderKeyRequestSchema }, response: ProviderConfiguredResponseSchema, mutation: true }),
   route({ id: "providers.key.delete", group: "providers", method: "DELETE", path: "/api/v1/providers/openai-key", request: { body: EmptyMutationRequestSchema }, response: ProviderConfiguredResponseSchema, mutation: true }),
@@ -645,6 +679,7 @@ export const PUBLIC_API_RESOURCE_GROUPS = [
 ] as const;
 
 export type RuntimeState = z.infer<typeof RuntimeStateSchema>;
+export type VaultSnapshotBoundary = z.infer<typeof VaultSnapshotBoundarySchema>;
 export type ThemePreference = z.infer<typeof ThemePreferenceSchema>;
 export type AppSettings = z.infer<typeof AppSettingsSchema>;
 export type BudgetSummary = z.infer<typeof BudgetSummarySchema>;

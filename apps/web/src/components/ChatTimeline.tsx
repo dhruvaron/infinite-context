@@ -124,6 +124,7 @@ export function ChatTimeline({ events, offline, hasOlder, loadingOlder, onLoadOl
       return <Message
         key={event.id}
         event={event}
+        offline={offline}
         references={event.runId ? referencesByRunId[event.runId] ?? [] : []}
         traceLoading={Boolean(event.runId && loadingTraceRunIds.has(event.runId))}
         highlighted={highlightedEventId === event.id}
@@ -145,8 +146,9 @@ export function ChatTimeline({ events, offline, hasOlder, loadingOlder, onLoadOl
   </div>;
 }
 
-function Message({ event, references, traceLoading, highlighted, onSource, onInspectAnswer, onShowInGraph, onOpenRevisions, onRegenerate, onDelete, onDeleteAttachment, onRetry }: {
+function Message({ event, offline, references, traceLoading, highlighted, onSource, onInspectAnswer, onShowInGraph, onOpenRevisions, onRegenerate, onDelete, onDeleteAttachment, onRetry }: {
   event: ConversationEvent;
+  offline: boolean;
   references: MemoryReference[];
   traceLoading: boolean;
   highlighted: boolean;
@@ -170,7 +172,7 @@ function Message({ event, references, traceLoading, highlighted, onSource, onIns
     {event.role === "assistant" && <div className="assistant-avatar" aria-hidden="true"><Sparkles size={16} /></div>}
     <div className={event.role === "assistant" ? "assistant-body" : "message-bubble"}>
       {event.attachments.length > 0 && <div className="message-attachments">
-        {event.attachments.map((attachment) => <PersistedAttachment key={attachment.id} attachment={attachment} onDelete={onDeleteAttachment} />)}
+        {event.attachments.map((attachment) => <PersistedAttachment key={attachment.id} attachment={attachment} offline={offline} onDelete={onDeleteAttachment} />)}
       </div>}
       <div className="message-content">
         {event.role === "assistant" ? <SafeMarkdown onTopicLink={(identity) => onSource({ id: identity, type: "topic", title: identity, excerpt: "Related durable-memory page", topicId: identity })}>{event.content || (streaming ? "" : "No response content.")}</SafeMarkdown> : <p>{event.content}</p>}
@@ -192,7 +194,7 @@ function Message({ event, references, traceLoading, highlighted, onSource, onIns
         <div className="message-actions">
           <IconButton label={copied ? "Copied" : "Copy message"} onClick={() => { void navigator.clipboard.writeText(event.content); setCopied(true); window.setTimeout(() => setCopied(false), 1500); }}>{copied ? <Check size={14} /> : <Copy size={14} />}</IconButton>
           {event.role === "assistant" && event.runId && !streaming && <IconButton label="Inspect this answer’s provenance" onClick={() => onInspectAnswer(event)}><BrainCircuit size={14} /></IconButton>}
-          {event.role === "assistant" && !streaming && <IconButton label="Show this answer in the knowledge graph" onClick={() => onShowInGraph(event)}><GitBranch size={14} /></IconButton>}
+          {event.role === "assistant" && !streaming && <IconButton label="Show this answer in the knowledge graph" disabled={offline} onClick={() => onShowInGraph(event)}><GitBranch size={14} /></IconButton>}
           {event.role === "assistant" && !streaming && <IconButton label="View persisted response revisions" onClick={() => onOpenRevisions(event.id)}><History size={14} /></IconButton>}
           {event.role === "assistant" && !streaming && <IconButton label="Regenerate response" onClick={() => onRegenerate(event.id)}><RefreshCw size={14} /></IconButton>}
           <div className="popover-anchor">
@@ -205,9 +207,9 @@ function Message({ event, references, traceLoading, highlighted, onSource, onIns
   </article>;
 }
 
-function PersistedAttachment({ attachment, onDelete }: { attachment: Attachment; onDelete: (attachmentId: string, title: string) => void }) {
+function PersistedAttachment({ attachment, offline, onDelete }: { attachment: Attachment; offline: boolean; onDelete: (attachmentId: string, title: string) => void }) {
   const [previewFailed, setPreviewFailed] = useState(false);
-  const canPreview = attachment.status === "ready" && attachment.mediaType.startsWith("image/") && !previewFailed;
+  const canPreview = !offline && attachment.status === "ready" && attachment.mediaType.startsWith("image/") && !previewFailed;
   return <div className={`message-file-wrap ${canPreview ? "message-image-wrap" : ""}`}>
     {canPreview
       ? <figure className="message-image"><img src={continuumApi.attachmentContentUrl(attachment.id)} alt={attachment.filename} loading="lazy" decoding="async" onError={() => setPreviewFailed(true)} /><figcaption><strong>{attachment.filename}</strong><small>{formatBytes(attachment.size)}</small></figcaption></figure>

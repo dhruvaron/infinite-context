@@ -232,7 +232,7 @@ class SqliteMemoryToolRepository implements MemoryToolRepository {
     const maximumCharacters = input.limit * 2_000;
     let end = Math.min(event.content.length, offset + maximumCharacters);
     // Never split a UTF-16 surrogate pair between pages.
-    if (end < event.content.length && /[\uD800-\uDBFF]/.test(event.content[end - 1] ?? "") && /[\uDC00-\uDFFF]/.test(event.content[end] ?? "")) end += 1;
+    if (end < event.content.length && /[\uD800-\uDBFF]/.test(event.content[end - 1] ?? "") && /[\uDC00-\uDFFF]/.test(event.content[end] ?? "")) end -= 1;
     return {
       items: [{
         id: event.id,
@@ -587,7 +587,7 @@ export class LocalToolRuntime {
       .filter((row) => Number(row.authorized) === 1 && Number(row.read_only) === 1)
       .slice(0, 100);
     const hasWorkspace = authorizedWorkspaces.length > 0;
-    const workspaceIntent = /\b(file|folder|workspace|repository|repo|codebase|source code|project files?|directory|path|readme|package\.json)\b|(?:^|\s)(?:\.?\.?\/)?[\w.@-]+(?:\/[\w.@-]+)+|\b[\w@-]+\.(?:md|txt|json|ya?ml|toml|ini|ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|c|cc|cpp|h|hpp|css|scss|html|sql|sh|zsh|fish)\b/i.test(userRequest);
+    const workspaceIntent = /\b(files?|folder|workspace|repository|repo|codebase|source code|project files?|directory|path|readme|package\.json)\b|(?:^|\s)(?:\.?\.?\/)?[\w.@-]+(?:\/[\w.@-]+)+|\b[\w@-]+\.(?:md|txt|json|ya?ml|toml|ini|ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|c|cc|cpp|h|hpp|css|scss|html|sql|sh|zsh|fish)\b/i.test(userRequest);
     if (hasWorkspace && workspaceIntent) {
       tools.push(...new WorkspaceReader(new SqliteWorkspaceRegistry(database), secretGrants).tools());
       const rootCatalog = JSON.stringify(authorizedWorkspaces.map((row) => ({

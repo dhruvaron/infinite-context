@@ -135,11 +135,17 @@ export interface TopicShardRevisionContent {
 }
 
 export function topicShardRevisionContentHash(content: TopicShardRevisionContent): string {
-  const { topicId: _topicId, revisionId: _revisionId, revision: _revision, ...revisionContent } = content;
   return topicShardFingerprint({
     schemaVersion: 1,
     kind: "candidate-revision",
-    ...revisionContent,
+    markdown: content.markdown,
+    summary: content.summary,
+    currentState: content.currentState,
+    history: content.history,
+    openQuestionsJson: content.openQuestionsJson,
+    generationInputsJson: content.generationInputsJson,
+    authorType: content.authorType,
+    promptVersion: content.promptVersion,
     provenance: [...content.provenance].sort((left, right) =>
       left.section.localeCompare(right.section)
       || left.start - right.start
@@ -426,13 +432,15 @@ export class ContinuumDatabase {
   }
 
   /**
-   * Migration 14 can only seed SQL-compatible lower/trim keys. Normalize the
-   * legacy ledger exactly once in JavaScript, then keep all product writes
-   * exact in upsertClaim. This avoids a full-ledger startup scan thereafter.
+   * Migration 14 can only seed SQL-compatible lower/trim keys, and its original
+   * UPDATE trigger could downgrade exact keys during topic/status changes.
+   * Normalize each affected schema generation exactly once in JavaScript, then
+   * keep all product writes exact in upsertClaim. This avoids a full-ledger
+   * startup scan thereafter.
    */
   #synchronizeClaimSlotIndex(): void {
     const state = this.connection.prepare("SELECT normalization_version FROM claim_slot_index_state WHERE id = 1").get() as { normalization_version: number } | undefined;
-    if (!state || state.normalization_version >= 2) return;
+    if (!state || state.normalization_version >= 3) return;
     this.rebuildClaimSlotIndex();
   }
 
@@ -466,7 +474,7 @@ export class ContinuumDatabase {
         row.status,
         row.active_evidence
       );
-      this.connection.prepare("UPDATE claim_slot_index_state SET normalization_version = 2 WHERE id = 1").run();
+      this.connection.prepare("UPDATE claim_slot_index_state SET normalization_version = 3 WHERE id = 1").run();
     })();
   }
 
@@ -633,9 +641,8 @@ export class ContinuumDatabase {
       ] as const;
       for (const [name, model, effort] of presets) {
         this.connection.prepare(`
-          INSERT INTO provider_presets(id, name, provider, model_id, reasoning_effort, parameters_json, active, updated_at)
+          INSERT OR IGNORE INTO provider_presets(id, name, provider, model_id, reasoning_effort, parameters_json, active, updated_at)
           VALUES (?, ?, 'openai', ?, ?, '{}', 1, ?)
-          ON CONFLICT(name) DO UPDATE SET model_id = excluded.model_id, reasoning_effort = excluded.reasoning_effort, updated_at = excluded.updated_at
         `).run(uuidv7(), name, model, effort, timestamp);
       }
     }
@@ -2281,7 +2288,15 @@ export class ContinuumDatabase {
   }): TopicPage {
     return this.connection.transaction(() => {
       const timestamp = now();
-      const existing = this.connection.prepare("SELECT id, active_revision, update_policy FROM topic_pages WHERE scope_id = 'global' AND slug = ?").get(input.slug) as { id: string; active_revision: number; update_policy: "automatic" | "confirm" } | undefined;
+      type ExistingTopic = { id: string; active_revision: number; update_policy: "automatic" | "confirm" };
+      const existingById = input.id
+        ? this.connection.prepare("SELECT id, active_revision, update_policy FROM topic_pages WHERE scope_id = 'global' AND id = ?").get(input.id) as ExistingTopic | undefined
+        : undefined;
+      const existingBySlug = this.connection.prepare("SELECT id, active_revision, update_policy FROM topic_pages WHERE scope_id = 'global' AND slug = ?").get(input.slug) as ExistingTopic | undefined;
+      if (existingBySlug && input.id && existingBySlug.id !== input.id) {
+        throw Object.assign(new Error(`Topic slug ${input.slug} already belongs to another topic.`), { code: "TOPIC_SLUG_CONFLICT" });
+      }
+      const existing = existingById ?? existingBySlug;
       const topicId = existing?.id ?? input.id ?? uuidv7();
       const revision = (existing?.active_revision ?? 0) + 1;
       const updatePolicy = input.updatePolicy ?? (input.authorType === "user" ? "confirm" : existing?.update_policy ?? "automatic");
@@ -2292,8 +2307,8 @@ export class ContinuumDatabase {
         `).run(topicId, input.type, input.slug, input.title, revision, JSON.stringify(input.tags ?? []), timestamp, timestamp, updatePolicy);
       } else {
         this.connection.prepare(`
-          UPDATE topic_pages SET core_type = ?, title = ?, active_revision = ?, tags_json = ?, updated_at = ?, update_policy = ? WHERE id = ?
-        `).run(input.type, input.title, revision, JSON.stringify(input.tags ?? []), timestamp, updatePolicy, topicId);
+          UPDATE topic_pages SET core_type = ?, slug = ?, title = ?, active_revision = ?, tags_json = ?, updated_at = ?, update_policy = ? WHERE id = ?
+        `).run(input.type, input.slug, input.title, revision, JSON.stringify(input.tags ?? []), timestamp, updatePolicy, topicId);
       }
       const revisionId = uuidv7();
       this.connection.prepare(`
@@ -3611,7 +3626,7 @@ export class ContinuumDatabase {
    * identifier. These tables are deliberately denormalized for diagnostics and
    * replay, so foreign keys cannot provide the privacy closure for us.
    */
-  #scrubIdentifierShadows(removed: readonly string[]): Record<string, number> {
+  #scrubIdentifierShadows(removed: readonly string[]) {
     const removedIds = [...new Set(removed.filter(Boolean))];
     const counts = {
       jobsRemoved: 0,
@@ -3842,7 +3857,7 @@ export class ContinuumDatabase {
     initialSourceIds: readonly string[],
     initialClaimIds: readonly string[] = [],
     initialTopicIds: readonly string[] = [],
-    initialRevisionRows: readonly Array<{ id: string; topic_id: string }> = []
+    initialRevisionRows: ReadonlyArray<{ id: string; topic_id: string }> = []
   ): {
     sourceIds: string[];
     claimIds: string[];

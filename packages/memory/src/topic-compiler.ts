@@ -35,6 +35,7 @@ export interface TopicCompilationInput {
 
 /** Approximately 2,500 tokens under the documented 4-characters/token sizing rule. */
 export const MAX_ACTIVE_TOPIC_CHARACTERS = 10_000;
+const CHILD_NAVIGATION_HEADROOM = 1_024;
 
 export function slugifyTopic(title: string): string {
   const slug = title
@@ -179,8 +180,10 @@ function fragmentParagraphs(
 ): TopicParagraph[] {
   const boundedTitle = title.slice(0, 160);
   const emptyOverhead = renderPage(`${boundedTitle} — Current state 9999`, []).length;
-  // Leave room for parent/previous/next navigation added after batching.
-  const contentLimit = Math.max(96, maxCharacters - emptyOverhead - 320);
+  // Leave room for the bounded parent/previous/next links added after
+  // batching. Their labels and Continuum identities can together exceed a
+  // few hundred characters on middle shards.
+  const contentLimit = Math.max(96, maxCharacters - emptyOverhead - CHILD_NAVIGATION_HEADROOM);
   return paragraphs.flatMap((paragraph) =>
     splitText(paragraph.markdown, contentLimit).map((markdown, index, fragments) => ({
       ...paragraph,
@@ -235,7 +238,7 @@ function compileChildPages(
     for (const fragment of sectionFragments) {
       const candidate = [...content, fragment];
       const provisionalTitle = `${input.title.slice(0, 160)} — ${group.label} ${part}`;
-      if (content.length > 0 && renderPage(provisionalTitle, candidate).length > maxCharacters - 320) push();
+      if (content.length > 0 && renderPage(provisionalTitle, candidate).length > maxCharacters - CHILD_NAVIGATION_HEADROOM) push();
       content.push(fragment);
     }
     push();

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadConfig, type AppConfig } from "@continuum/config";
+import { loadConfig, stableHash, type AppConfig } from "@continuum/config";
 import type { ContinuumDatabase } from "@continuum/database";
 import { buildApp } from "./app.js";
 
@@ -257,7 +257,7 @@ describe("long-session API correctness", () => {
     expect(unauthenticated.statusCode).toBe(401);
   });
 
-  it("replays topic create and patch independently even when their operation-scoped key is reused", async () => {
+  it("replays topic create and patch independently and binds each embedding job to the written revision", async () => {
     const value = await fixture("topic-replay");
     const idempotencyKey = "shared-topic-operation-key";
     const createBody = {
@@ -289,6 +289,16 @@ describe("long-session API correctness", () => {
     expect((firstPatch.json() as { revision: number }).revision).toBe(2);
     expect(value.database.connection.prepare("SELECT COUNT(*) AS count FROM topic_page_revisions WHERE topic_id = ?").get(topic.id)).toEqual({ count: 2 });
     expect(value.database.connection.prepare("SELECT COUNT(*) AS count FROM idempotency_keys WHERE key = ?").get(idempotencyKey)).toEqual({ count: 2 });
+    const revisionHashes = (value.database.connection.prepare(`
+      SELECT revision_number, markdown FROM topic_page_revisions WHERE topic_id = ? ORDER BY revision_number
+    `).all(topic.id) as Array<{ revision_number: number; markdown: string }>)
+      .map((revision) => stableHash(revision.markdown))
+      .sort();
+    const embeddingBindings = value.database.listJobs(100)
+      .filter((job) => job.type === "embedding.index" && job.payload.sourceId === topic.id && job.payload.sourceType === "topic")
+      .map((job) => String(job.payload.contentHash))
+      .sort();
+    expect(embeddingBindings).toEqual(revisionHashes);
   });
 
   it("replays a completed topic deletion after the object is gone and creates one receipt", async () => {
@@ -331,7 +341,9 @@ describe("long-session API correctness", () => {
     expect(value.database.getTopic(topicId)).toBeNull();
     expect(value.database.connection.prepare("SELECT COUNT(*) AS count FROM deletion_receipts WHERE object_type = 'topic'").get()).toEqual({ count: 1 });
     expect(value.database.connection.prepare("SELECT COUNT(*) AS count FROM deletion_operations WHERE object_type = 'topic'").get()).toEqual({ count: 1 });
-    expect(value.database.connection.prepare("SELECT COUNT(*) AS count FROM idempotency_keys WHERE key = ?").get(idempotencyKey)).toEqual({ count: 2 });
+    expect(value.database.connection.prepare(`
+      SELECT operation FROM idempotency_keys WHERE key = ? ORDER BY operation
+    `).all(idempotencyKey)).toEqual([{ operation: "deletion.topics" }]);
   });
 
   it("destroys every managed projection and orphaned file beyond the old 500-row boundary", async () => {

@@ -8,9 +8,15 @@ import { ApiRequestError, continuumApi } from "./lib/api-client";
 import { demoBootstrap } from "./lib/demo-data";
 import { DRAFT_REVISION_KEY, persistMessageIntent, persistRegenerationIntent, readMessageIntent, readRegenerationIntent } from "./lib/mutation-intents";
 
+const contractBudget = {
+  ...demoBootstrap.budget,
+  hardLimitUsd: demoBootstrap.budget.capUsd,
+  spentUsd: demoBootstrap.budget.totalUsd
+};
+
 function renderApp() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={client}><App /></QueryClientProvider>);
+  return { ...render(<QueryClientProvider client={client}><App /></QueryClientProvider>), client };
 }
 
 describe("Continuum application", () => {
@@ -55,6 +61,132 @@ describe("Continuum application", () => {
     expect(welcome).toBeVisible();
     await user.keyboard("{Meta>}k{/Meta}");
     expect(screen.queryByRole("dialog", { name: /search your entire history/i })).not.toBeInTheDocument();
+  });
+
+  it("restores the exact trusted personal view after a temporary demo preview", async () => {
+    const personalEvent = { ...demoBootstrap.events[0]!, id: "0aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", sequence: 1, content: "Exact personal vault event" };
+    const personalSettings = { ...demoBootstrap.settings, onboardingComplete: false, quality: "deep" as const, theme: "dark" as const };
+    localStorage.setItem("continuum.unsent-draft", "Exact personal draft");
+    localStorage.setItem(DRAFT_REVISION_KEY, "exact-personal-draft-revision");
+    vi.mocked(continuumApi.bootstrap).mockResolvedValue({
+      ...demoBootstrap,
+      runtime: { ...demoBootstrap.runtime, mode: "connected", apiReachable: true },
+      settings: personalSettings,
+      events: [personalEvent]
+    });
+    vi.spyOn(continuumApi, "saveSettings").mockImplementation(async (patch) => ({ ...personalSettings, ...patch }));
+    const user = userEvent.setup();
+    renderApp();
+
+    expect(await screen.findByText(personalEvent.content)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("checkbox", { name: /open a temporary demo preview/i }));
+    await user.click(screen.getByRole("button", { name: "Enter Continuum" }));
+
+    expect(await screen.findByText("Temporary demo preview")).toBeVisible();
+    expect(screen.queryByText(personalEvent.content)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Balanced" })).toBeVisible();
+    const composer = screen.getByRole("textbox", { name: "Message Continuum" });
+    await user.clear(composer);
+    await user.type(composer, "Demo-only draft");
+    expect(localStorage.getItem("continuum.unsent-draft")).toBe("Exact personal draft");
+    expect(localStorage.getItem(DRAFT_REVISION_KEY)).toBe("exact-personal-draft-revision");
+    await user.click(screen.getByRole("button", { name: "Leave preview" }));
+
+    expect(await screen.findByText(personalEvent.content)).toBeVisible();
+    expect(screen.queryByText("Temporary demo preview")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Deep" })).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "Message Continuum" })).toHaveValue("Exact personal draft");
+    expect(localStorage.getItem(DRAFT_REVISION_KEY)).toBe("exact-personal-draft-revision");
+  });
+
+  it("keeps the personal draft durable when a preview tab reloads before Leave preview", async () => {
+    const personalSettings = { ...demoBootstrap.settings, onboardingComplete: false };
+    localStorage.setItem("continuum.unsent-draft", "Personal crash-safe draft");
+    localStorage.setItem(DRAFT_REVISION_KEY, "personal-crash-safe-revision");
+    vi.mocked(continuumApi.bootstrap).mockResolvedValue({
+      ...demoBootstrap,
+      runtime: { ...demoBootstrap.runtime, mode: "connected", apiReachable: true },
+      settings: personalSettings
+    });
+    vi.spyOn(continuumApi, "saveSettings").mockImplementation(async (patch) => ({ ...personalSettings, ...patch }));
+    const user = userEvent.setup();
+    const first = renderApp();
+    await user.click(await screen.findByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("checkbox", { name: /open a temporary demo preview/i }));
+    await user.click(screen.getByRole("button", { name: "Enter Continuum" }));
+    const previewComposer = await screen.findByRole("textbox", { name: "Message Continuum" });
+    await user.type(previewComposer, "Ephemeral preview text");
+    first.unmount();
+
+    expect(localStorage.getItem("continuum.unsent-draft")).toBe("Personal crash-safe draft");
+    expect(localStorage.getItem(DRAFT_REVISION_KEY)).toBe("personal-crash-safe-revision");
+    renderApp();
+    expect(await screen.findByRole("textbox", { name: "Message Continuum" })).toHaveValue("Personal crash-safe draft");
+  });
+
+  it("scrubs the retained personal snapshot when the canonical vault boundary changed during preview", async () => {
+    const oldEvent = { ...demoBootstrap.events[0]!, id: "0bbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", content: "Old vault secret" };
+    const replacementEvent = { ...demoBootstrap.events[0]!, id: "0ccccccc-cccc-4ccc-8ccc-cccccccccccc", content: "Replacement vault content" };
+    const personalSettings = { ...demoBootstrap.settings, onboardingComplete: false };
+    const original = {
+      ...demoBootstrap,
+      vaultBoundary: { generation: 10, maintenanceLocked: false, vaultId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+      runtime: { ...demoBootstrap.runtime, mode: "connected" as const, apiReachable: true },
+      settings: personalSettings,
+      events: [oldEvent]
+    };
+    const replacement = {
+      ...original,
+      vaultBoundary: { generation: 12, maintenanceLocked: false, vaultId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+      settings: { ...personalSettings, onboardingComplete: true },
+      events: [replacementEvent]
+    };
+    vi.mocked(continuumApi.bootstrap).mockReset().mockResolvedValueOnce(original).mockResolvedValue(replacement);
+    vi.spyOn(continuumApi, "saveSettings").mockImplementation(async (patch) => ({ ...personalSettings, ...patch }));
+    const user = userEvent.setup();
+    renderApp();
+    await user.click(await screen.findByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("checkbox", { name: /open a temporary demo preview/i }));
+    await user.click(screen.getByRole("button", { name: "Enter Continuum" }));
+    await user.click(await screen.findByRole("button", { name: "Leave preview" }));
+
+    expect(await screen.findByRole("button", { name: "Retry connection" })).toBeVisible();
+    expect(screen.queryByText(oldEvent.content)).not.toBeInTheDocument();
+    expect(screen.queryByText(replacementEvent.content)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+  });
+
+  it("scrubs the retained personal snapshot when Leave preview cannot verify a canonical boundary", async () => {
+    const oldEvent = { ...demoBootstrap.events[0]!, id: "0ddddddd-dddd-4ddd-8ddd-dddddddddddd", content: "Unavailable old vault secret" };
+    const personalSettings = { ...demoBootstrap.settings, onboardingComplete: false };
+    vi.mocked(continuumApi.bootstrap).mockReset()
+      .mockResolvedValueOnce({
+        ...demoBootstrap,
+        vaultBoundary: { generation: 20, maintenanceLocked: false, vaultId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+        runtime: { ...demoBootstrap.runtime, mode: "connected", apiReachable: true },
+        settings: personalSettings,
+        events: [oldEvent]
+      })
+      .mockRejectedValue(new ApiRequestError("service unavailable", "OFFLINE", true));
+    vi.spyOn(continuumApi, "saveSettings").mockImplementation(async (patch) => ({ ...personalSettings, ...patch }));
+    const user = userEvent.setup();
+    renderApp();
+    await user.click(await screen.findByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("checkbox", { name: /open a temporary demo preview/i }));
+    await user.click(screen.getByRole("button", { name: "Enter Continuum" }));
+    await user.click(await screen.findByRole("button", { name: "Leave preview" }));
+
+    expect(await screen.findByRole("button", { name: "Retry connection" })).toBeVisible();
+    expect(screen.queryByText(oldEvent.content)).not.toBeInTheDocument();
   });
 
   it("optimistically appends and completes a demo-vault response", async () => {
@@ -124,6 +256,56 @@ describe("Continuum application", () => {
     expect(screen.getByRole("button", { name: "Resume response" })).toBeVisible();
   });
 
+  it("seeds response retry from an active run even before an assistant event exists", async () => {
+    const runId = "8aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const userMessage = { ...demoBootstrap.events[0]!, id: "8bbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", sequence: 1, runId: null, content: "Retry me after retrieval fails" };
+    vi.mocked(continuumApi.bootstrap).mockResolvedValue({
+      ...demoBootstrap,
+      runtime: { ...demoBootstrap.runtime, mode: "connected", apiReachable: true },
+      events: [userMessage],
+      activeRuns: [{ id: runId, status: "retrieving", userEventId: userMessage.id, assistantEventId: null }],
+      latestFailedRun: null
+    });
+    vi.spyOn(continuumApi, "getBudgetSummary").mockResolvedValue(contractBudget);
+    vi.spyOn(continuumApi, "streamRun").mockImplementation(async (_runId, handlers) => {
+      handlers.onEvent({ type: "run.failed", runId, code: "RETRIEVAL_FAILED", message: "Retrieval failed before response creation." }, { id: "1" });
+      return { lastEventId: "1", terminal: true };
+    });
+    const regenerate = vi.spyOn(continuumApi, "regenerate").mockResolvedValue({ runId: "8ccccccc-cccc-4ccc-8ccc-cccccccccccc", quality: "balanced" });
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(await screen.findByRole("button", { name: "Retry response" }));
+
+    expect(regenerate).toHaveBeenCalledWith(userMessage.id, expect.any(String));
+  });
+
+  it("restores only the newest failed run retry after reload and clears it after a newer terminal run", async () => {
+    const failedRunId = "9aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const userMessage = { ...demoBootstrap.events[0]!, id: "9bbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", sequence: 1, runId: null, content: "Durable retry parent" };
+    const failedSnapshot = {
+      ...demoBootstrap,
+      runtime: { ...demoBootstrap.runtime, mode: "connected" as const, apiReachable: true },
+      events: [userMessage],
+      activeRuns: [],
+      latestFailedRun: { id: failedRunId, status: "failed" as const, userEventId: userMessage.id, assistantEventId: null, errorCode: "API_RESTARTED", createdAt: "2026-01-01T00:00:00.000Z", completedAt: "2026-01-01T00:01:00.000Z" }
+    };
+    vi.mocked(continuumApi.bootstrap)
+      .mockResolvedValueOnce(failedSnapshot)
+      .mockResolvedValueOnce({ ...failedSnapshot, latestFailedRun: null });
+    vi.spyOn(continuumApi, "getBudgetSummary").mockResolvedValue(contractBudget);
+    const regenerate = vi.spyOn(continuumApi, "regenerate").mockResolvedValue({ runId: "9ccccccc-cccc-4ccc-8ccc-cccccccccccc", quality: "balanced" });
+    vi.spyOn(continuumApi, "streamRun").mockResolvedValue({ lastEventId: "1", terminal: true });
+    const user = userEvent.setup();
+    const { client } = renderApp();
+
+    await user.click(await screen.findByRole("button", { name: "Retry response" }));
+    expect(regenerate).toHaveBeenCalledWith(userMessage.id, expect.any(String));
+    await client.refetchQueries({ queryKey: ["bootstrap"] });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Retry response" })).not.toBeInTheDocument());
+    expect(screen.queryByText(/local service restarted before this response completed/i)).not.toBeInTheDocument();
+  });
+
   it("keeps a saved run active and blocks a second send when reconnect attempts are exhausted", async () => {
     const runId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
     const savedUser = { ...demoBootstrap.events[0]!, id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", sequence: 1, runId: null, parentEventId: null, content: "First request" };
@@ -160,7 +342,7 @@ describe("Continuum application", () => {
       events: [],
       activeRuns: []
     });
-    vi.spyOn(continuumApi, "getBudgetSummary").mockResolvedValue(demoBootstrap.budget);
+    vi.spyOn(continuumApi, "getBudgetSummary").mockResolvedValue(contractBudget);
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockRejectedValueOnce(new TypeError("response disappeared after commit"))
       .mockResolvedValueOnce(new Response(JSON.stringify({ found: true, operation: "messages.create", result: { event: savedUser, runId } }), { status: 200, headers: { "Content-Type": "application/json" } }));
@@ -190,10 +372,10 @@ describe("Continuum application", () => {
       events: [],
       activeRuns: []
     });
-    vi.spyOn(continuumApi, "getBudgetSummary").mockResolvedValue(demoBootstrap.budget);
+    vi.spyOn(continuumApi, "getBudgetSummary").mockResolvedValue(contractBudget);
     const create = vi.spyOn(continuumApi, "createMessage");
     const nativeSetItem = Storage.prototype.setItem;
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (key, value) {
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
       if (key === "continuum.unsent-draft") throw new DOMException("Quota exceeded", "QuotaExceededError");
       return nativeSetItem.call(this, key, value);
     });
@@ -223,7 +405,7 @@ describe("Continuum application", () => {
       events: [],
       activeRuns: []
     });
-    vi.spyOn(continuumApi, "getBudgetSummary").mockResolvedValue(demoBootstrap.budget);
+    vi.spyOn(continuumApi, "getBudgetSummary").mockResolvedValue(contractBudget);
     const recover = vi.spyOn(continuumApi, "recoverMutation").mockResolvedValue({ found: true, operation: "messages.create", result: { event: savedUser, runId } });
     const create = vi.spyOn(continuumApi, "createMessage");
     vi.spyOn(continuumApi, "streamRun").mockImplementation(async (_runId, handlers) => {
@@ -233,7 +415,7 @@ describe("Continuum application", () => {
     renderApp();
 
     expect(await screen.findByText(savedUser.content)).toBeVisible();
-    expect(recover).toHaveBeenCalledWith("messages.create", messageKey);
+    await waitFor(() => expect(recover).toHaveBeenCalledWith("messages.create", messageKey));
     expect(create).not.toHaveBeenCalled();
     expect(readMessageIntent()).toBeNull();
     expect(localStorage.getItem("continuum.unsent-draft")).toBeNull();
@@ -261,7 +443,7 @@ describe("Continuum application", () => {
       events: [],
       activeRuns: []
     });
-    vi.spyOn(continuumApi, "getBudgetSummary").mockResolvedValue(demoBootstrap.budget);
+    vi.spyOn(continuumApi, "getBudgetSummary").mockResolvedValue(contractBudget);
     vi.spyOn(continuumApi, "recoverMutation").mockImplementation(async (operation) => ({ found: false as const, operation }));
     const create = vi.spyOn(continuumApi, "createMessage");
     renderApp();
@@ -300,7 +482,7 @@ describe("Continuum application", () => {
       events: [],
       activeRuns: []
     });
-    vi.spyOn(continuumApi, "getBudgetSummary").mockResolvedValue(demoBootstrap.budget);
+    vi.spyOn(continuumApi, "getBudgetSummary").mockResolvedValue(contractBudget);
     vi.spyOn(continuumApi, "recoverMutation").mockImplementation(async (operation) => operation === "attachments.upload"
       ? { found: true as const, operation, result: attachment }
       : { found: false as const, operation });
@@ -331,7 +513,7 @@ describe("Continuum application", () => {
       settings: { ...demoBootstrap.settings, onboardingComplete: true },
       activeRuns: []
     });
-    vi.spyOn(continuumApi, "getBudgetSummary").mockResolvedValue(demoBootstrap.budget);
+    vi.spyOn(continuumApi, "getBudgetSummary").mockResolvedValue(contractBudget);
     const recover = vi.spyOn(continuumApi, "recoverMutation").mockResolvedValue({ found: true, operation: "events.regenerate", result: { runId, quality: "balanced" } });
     const regenerate = vi.spyOn(continuumApi, "regenerate");
     const stream = vi.spyOn(continuumApi, "streamRun").mockImplementation(async (_runId, handlers) => {
@@ -354,7 +536,7 @@ describe("Continuum application", () => {
       settings: { ...demoBootstrap.settings, onboardingComplete: true },
       activeRuns: []
     });
-    vi.spyOn(continuumApi, "getBudgetSummary").mockResolvedValue(demoBootstrap.budget);
+    vi.spyOn(continuumApi, "getBudgetSummary").mockResolvedValue(contractBudget);
     const regenerate = vi.spyOn(continuumApi, "regenerate")
       .mockRejectedValueOnce(new ApiRequestError("response lost", "REQUEST_FAILED", true))
       .mockResolvedValueOnce({ runId, quality: "balanced" });
@@ -487,6 +669,81 @@ describe("Continuum application", () => {
     await user.click(screen.getByRole("button", { name: /inspect this answer.*provenance/i }));
     await waitFor(() => expect(debugSpy).toHaveBeenCalledWith(runId));
     expect(await screen.findByText("sha256:fresh-reference-reconstruction")).toBeVisible();
+  });
+
+  it("preserves the last verified vault read-only when a later core bootstrap fails", async () => {
+    const retainedEvent = { ...demoBootstrap.events[0]!, id: "6aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", sequence: 1, content: "Retain this verified vault event" };
+    const connected = {
+      ...demoBootstrap,
+      runtime: { ...demoBootstrap.runtime, mode: "connected" as const, apiReachable: true },
+      settings: { ...demoBootstrap.settings, onboardingComplete: true },
+      events: [retainedEvent]
+    };
+    vi.mocked(continuumApi.bootstrap).mockReset().mockResolvedValueOnce(connected).mockRejectedValue(new ApiRequestError("A core read failed", "BOOTSTRAP_INCOMPLETE", true));
+    vi.spyOn(continuumApi, "getBudgetSummary").mockResolvedValue(contractBudget);
+    const graphRead = vi.spyOn(continuumApi, "getGraph");
+    const proposalRead = vi.spyOn(continuumApi, "listMemoryProposals");
+    const debugRead = vi.spyOn(continuumApi, "getRunDebug");
+    const traceRead = vi.spyOn(continuumApi, "getRetrievalTrace");
+    const user = userEvent.setup();
+    const { client } = renderApp();
+    expect(await screen.findByText(retainedEvent.content)).toBeVisible();
+
+    await client.refetchQueries({ queryKey: ["bootstrap"] });
+
+    expect(await screen.findByRole("button", { name: "Retry connection" })).toBeVisible();
+    expect(screen.getByText(retainedEvent.content)).toBeVisible();
+    expect(screen.getByText(/last verified vault view is preserved read-only/i)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Balanced" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Search memory" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Open knowledge graph" })).toBeDisabled();
+    await user.keyboard("{Meta>}k{/Meta}");
+    expect(screen.queryByRole("dialog", { name: /search your entire history/i })).not.toBeInTheDocument();
+    graphRead.mockClear(); proposalRead.mockClear(); debugRead.mockClear(); traceRead.mockClear();
+    await user.click(screen.getByRole("button", { name: "Open memory inspector" }));
+    await waitFor(() => expect(screen.getByRole("complementary", { name: "Memory inspector" })).toBeVisible());
+    expect(graphRead).not.toHaveBeenCalled();
+    expect(proposalRead).not.toHaveBeenCalled();
+    expect(debugRead).not.toHaveBeenCalled();
+    expect(traceRead).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    expect(await screen.findByRole("button", { name: "Save settings" })).toBeDisabled();
+  });
+
+  it("keeps unrelated draft work and retry identities across one-item hard deletion", async () => {
+    const retainedEvent = { ...demoBootstrap.events[0]!, id: "7aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", sequence: 1, content: "Delete only this retained event" };
+    const connected = {
+      ...demoBootstrap,
+      runtime: { ...demoBootstrap.runtime, mode: "connected" as const, apiReachable: true },
+      settings: { ...demoBootstrap.settings, onboardingComplete: true },
+      events: [retainedEvent],
+      activeRuns: [],
+      latestFailedRun: null
+    };
+    vi.mocked(continuumApi.bootstrap).mockReset()
+      .mockResolvedValueOnce(connected)
+      .mockResolvedValue({ ...connected, events: [] });
+    vi.spyOn(continuumApi, "getBudgetSummary").mockResolvedValue(contractBudget);
+    vi.spyOn(continuumApi, "deletionImpact").mockResolvedValue({ confirmationToken: "d".repeat(64), events: 1, attachments: 0, claimsRemoved: 0, claimsRetained: 0, topicsRebuilt: 0, edgesRemoved: 0, managedBackupsAffected: 0 });
+    vi.spyOn(continuumApi, "confirmDeletion").mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    const { container } = renderApp();
+    await screen.findByText(retainedEvent.content);
+    const input = screen.getByRole("textbox", { name: "Message Continuum" });
+    await user.type(input, "Unrelated work in progress");
+    await user.upload(container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(["notes"], "pending-notes.txt", { type: "text/plain" }));
+    const retryIdentity = "item-delete-preserved-regeneration";
+    expect(persistRegenerationIntent({ operation: "events.regenerate", eventId: demoBootstrap.events[1]!.id, idempotencyKey: retryIdentity, createdAt: "2026-07-14T12:00:00.000Z" })).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "More message actions" }));
+    await user.click(screen.getByRole("button", { name: "Delete permanently" }));
+    const dialog = await screen.findByRole("dialog", { name: "Delete permanently?" });
+    await user.click(within(dialog).getByRole("button", { name: "Delete permanently" }));
+
+    await waitFor(() => expect(screen.queryByText(retainedEvent.content)).not.toBeInTheDocument());
+    expect(screen.getByRole("textbox", { name: "Message Continuum" })).toHaveValue("Unrelated work in progress");
+    expect(screen.getByRole("button", { name: "Remove pending-notes.txt" })).toBeVisible();
+    expect(readRegenerationIntent()?.idempotencyKey).toBe(retryIdentity);
   });
 
   it("shows truthful offline state with no substituted vault content", async () => {

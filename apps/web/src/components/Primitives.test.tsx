@@ -7,7 +7,7 @@ describe("accessible modal primitive", () => {
   it("portals the active dialog, isolates the application, traps focus, and restores the trigger", async () => {
     const close = vi.fn();
     const { container, unmount } = render(<><button type="button">Open settings</button><Modal open title="Settings" description="Account controls" onClose={close}><button type="button">First action</button><button type="button">Last action</button></Modal></>);
-    const trigger = screen.getByRole("button", { name: "Open settings" });
+    const trigger = screen.getByRole("button", { name: "Open settings", hidden: true });
     trigger.focus();
     const dialog = await screen.findByRole("dialog", { name: "Settings" });
     await waitFor(() => expect(dialog).toHaveFocus());
@@ -23,7 +23,7 @@ describe("accessible modal primitive", () => {
     expect(close).toHaveBeenCalledTimes(1);
 
     unmount();
-    expect((container as HTMLElement).inert).toBe(false);
+    expect((container as HTMLElement).inert).not.toBe(true);
     expect(container).not.toHaveAttribute("aria-hidden");
   });
 

@@ -110,16 +110,130 @@ describe("sensitive local settings", () => {
     const user = userEvent.setup();
     const view = render(<SettingsDialog {...shared} settings={demoBootstrap.settings} />);
     await user.click(screen.getByRole("button", { name: "Data" }));
-    const input = view.container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const input = screen.getByLabelText<HTMLInputElement>("Choose vault import file");
     await user.upload(input, new File(["vault"], "continuum.zip", { type: "application/zip" }));
     expect(await screen.findByRole("button", { name: "Replace with exact vault" })).toBeVisible();
 
     view.rerender(<SettingsDialog {...shared} settings={{ ...demoBootstrap.settings, quality: "deep" }} />);
     await user.click(screen.getByRole("button", { name: "Replace with exact vault" }));
     expect(await screen.findByRole("button", { name: "Retry exact replacement" })).toBeVisible();
-    expect(commit).toHaveBeenLastCalledWith(token, "replace");
+    expect(commit).toHaveBeenLastCalledWith(token, "replace", expect.any(String));
+    const firstCommitKey = commit.mock.calls[0]?.[2];
     await user.click(screen.getByRole("button", { name: "Retry exact replacement" }));
     await waitFor(() => expect(onVaultReplaced).toHaveBeenCalledOnce());
     expect(commit).toHaveBeenCalledTimes(2);
+    expect(commit.mock.calls[1]?.[2]).toBe(firstCommitKey);
+  });
+
+  it("treats a lost import commit response as a vault boundary instead of offering an unsafe exact retry", async () => {
+    const token = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    vi.spyOn(continuumApi, "verifyVaultImport").mockResolvedValue({
+      valid: true,
+      verificationToken: token,
+      archiveChecksum: "c".repeat(64),
+      size: 512,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      manifest: { counts: { events: 12 } }
+    });
+    vi.spyOn(continuumApi, "commitVerifiedVaultImport").mockRejectedValue(new ApiRequestError("Response lost", "OFFLINE", true, 0));
+    const onVaultReplaced = vi.fn().mockRejectedValue(new Error("Reconnect required"));
+    const user = userEvent.setup();
+    render(<SettingsDialog
+      open
+      settings={demoBootstrap.settings}
+      runtime={{ ...demoBootstrap.runtime, mode: "connected", apiReachable: true }}
+      budget={demoBootstrap.budget}
+      pinnedCount={0}
+      onClose={vi.fn()}
+      onSave={vi.fn().mockResolvedValue(undefined)}
+      onReset={vi.fn()}
+      onOpenMemory={vi.fn()}
+      onProviderChanged={vi.fn().mockResolvedValue(undefined)}
+      onVaultReplaced={onVaultReplaced}
+    />);
+    await user.click(screen.getByRole("button", { name: "Data" }));
+    await user.upload(screen.getByLabelText<HTMLInputElement>("Choose vault import file"), new File(["vault"], "continuum.zip", { type: "application/zip" }));
+    await user.click(await screen.findByRole("button", { name: "Replace with exact vault" }));
+
+    await waitFor(() => expect(onVaultReplaced).toHaveBeenCalledWith("ambiguous"));
+    expect(screen.queryByRole("button", { name: "Retry exact replacement" })).not.toBeInTheDocument();
+    expect(screen.getByText(/Import committed or may have committed/i)).toBeVisible();
+  });
+
+  it.each([
+    ["VERIFIED_IMPORT_CONSUMED", 410, false],
+    ["VERIFIED_IMPORT_IN_USE", 409, true],
+    ["VAULT_IMPORT_RECOVERY_REQUIRED", 503, true]
+  ])("scrubs the prior vault when import commit returns %s", async (code, status, retryable) => {
+    vi.spyOn(continuumApi, "verifyVaultImport").mockResolvedValue({
+      valid: true,
+      verificationToken: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      archiveChecksum: "d".repeat(64),
+      size: 512,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      manifest: { counts: { events: 12 } }
+    });
+    vi.spyOn(continuumApi, "commitVerifiedVaultImport").mockRejectedValue(new ApiRequestError("The import committed or is owned by another request.", code, retryable, status));
+    const onVaultReplaced = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(<SettingsDialog
+      open
+      settings={demoBootstrap.settings}
+      runtime={{ ...demoBootstrap.runtime, mode: "connected", apiReachable: true }}
+      budget={demoBootstrap.budget}
+      pinnedCount={0}
+      onClose={vi.fn()}
+      onSave={vi.fn().mockResolvedValue(undefined)}
+      onReset={vi.fn()}
+      onOpenMemory={vi.fn()}
+      onProviderChanged={vi.fn().mockResolvedValue(undefined)}
+      onVaultReplaced={onVaultReplaced}
+    />);
+    await user.click(screen.getByRole("button", { name: "Data" }));
+    await user.upload(screen.getByLabelText<HTMLInputElement>("Choose vault import file"), new File(["vault"], "continuum.zip", { type: "application/zip" }));
+    await user.click(await screen.findByRole("button", { name: "Replace with exact vault" }));
+
+    await waitFor(() => expect(onVaultReplaced).toHaveBeenCalledWith("ambiguous"));
+    expect(screen.queryByRole("button", { name: "Retry exact replacement" })).not.toBeInTheDocument();
+    expect(screen.getByText(/prior vault view was scrubbed/i)).toBeVisible();
+  });
+
+  it("keeps the prior view but discards the consumed token when rollback recovery proves the database did not commit", async () => {
+    vi.spyOn(continuumApi, "verifyVaultImport").mockResolvedValue({
+      valid: true,
+      verificationToken: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      archiveChecksum: "e".repeat(64),
+      size: 512,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      manifest: { counts: { events: 12 } }
+    });
+    vi.spyOn(continuumApi, "commitVerifiedVaultImport").mockRejectedValue(new ApiRequestError(
+      "Replacement rolled back; restart for cleanup.",
+      "VAULT_IMPORT_ROLLBACK_RECOVERY_REQUIRED",
+      true,
+      503
+    ));
+    const onVaultReplaced = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(<SettingsDialog
+      open
+      settings={demoBootstrap.settings}
+      runtime={{ ...demoBootstrap.runtime, mode: "connected", apiReachable: true }}
+      budget={demoBootstrap.budget}
+      pinnedCount={0}
+      onClose={vi.fn()}
+      onSave={vi.fn().mockResolvedValue(undefined)}
+      onReset={vi.fn()}
+      onOpenMemory={vi.fn()}
+      onProviderChanged={vi.fn().mockResolvedValue(undefined)}
+      onVaultReplaced={onVaultReplaced}
+    />);
+    await user.click(screen.getByRole("button", { name: "Data" }));
+    await user.upload(screen.getByLabelText<HTMLInputElement>("Choose vault import file"), new File(["vault"], "continuum.zip", { type: "application/zip" }));
+    await user.click(await screen.findByRole("button", { name: "Replace with exact vault" }));
+
+    expect(await screen.findByText(/prior vault was not replaced/i)).toBeVisible();
+    expect(onVaultReplaced).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Retry exact replacement" })).not.toBeInTheDocument();
   });
 });

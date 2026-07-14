@@ -51,6 +51,7 @@ import {
   SearchQuerySchema,
   SecretApprovalRequestSchema,
   SetProviderKeyRequestSchema,
+  SettingBatchMutationRequestSchema,
   SettingMutationRequestSchema,
   SourceDetailQuerySchema,
   StartMemoryLintRequestSchema,
@@ -60,6 +61,7 @@ import {
   TopicProposalRecordSchema,
   TopicProposalSchema,
   UpdateTopicRequestSchema,
+  VaultSnapshotBoundarySchema,
   type TopicProposalRecord,
   type TopicShardProposal,
   publicApiContractFor
@@ -82,6 +84,7 @@ import {
   MAX_VAULT_BUNDLE_BYTES,
   VaultBundleValidationError,
   VaultExportStorageError,
+  VaultImportRecoveryRequiredError,
   VaultImportStorageError,
   VaultMaintenance,
   VaultVerificationTokenError,
@@ -106,6 +109,7 @@ const ResponseModelsSchema = z.object({
   deep: ResponseModelIdSchema
 }).strict();
 const SettingMutationSchema = SettingMutationRequestSchema;
+const SettingBatchMutationSchema = SettingBatchMutationRequestSchema;
 const VaultDestroyMarkerSchema = z.object({
   format: z.literal("continuum-vault-destroy-v1"),
   idempotencyKey: IdempotencyKeySchema,
@@ -152,13 +156,6 @@ function offsetPage<T>(fetched: T[], limit: number, offset = 0): { items: T[]; n
 }
 
 type MaterializedShardSection = "overview" | "current_state" | "history" | "evidence";
-type MaterializedShardRow = {
-  child_topic_id: string;
-  section_key: MaterializedShardSection;
-  ordinal: number;
-  min_sort_key: string;
-  max_sort_key: string;
-};
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   const a = [...new Set(left)].sort();
@@ -1069,6 +1066,12 @@ export async function buildApp(overrides: Partial<Pick<AppServices, "config" | "
     if (!referenced) await attachmentStore.delete(hash);
   }
   database.setSetting("maintenance.locked", false);
+  let vaultSnapshotGeneration = Math.max(Date.now(), database.getSetting("maintenance.snapshotGeneration", 0));
+  const advanceVaultSnapshotGeneration = (): void => {
+    vaultSnapshotGeneration += 1;
+    database.setSetting("maintenance.snapshotGeneration", vaultSnapshotGeneration);
+  };
+  database.setSetting("maintenance.snapshotGeneration", vaultSnapshotGeneration);
   for (const pending of database.pendingRuns()) {
     const event = database.getEvent(pending.userEventId);
     if (event && (pending.quality === "fast" || pending.quality === "balanced" || pending.quality === "deep")) {
@@ -1098,6 +1101,7 @@ export async function buildApp(overrides: Partial<Pick<AppServices, "config" | "
       if (database.getSetting("maintenance.locked", false)) {
         throw new AppError("MAINTENANCE_BUSY", "Another local maintenance operation is already running.", 409, true);
       }
+      advanceVaultSnapshotGeneration();
       database.setSetting("maintenance.locked", true);
       ownsPersistentLock = true;
       if (options.cancelRuns ?? true) orchestrator.cancelAll();
@@ -1111,13 +1115,17 @@ export async function buildApp(overrides: Partial<Pick<AppServices, "config" | "
       }
       throw new AppError("MAINTENANCE_BUSY", "Continuum is still finishing active requests, runs, jobs, or backups. Try the operation again in a moment.", 409, true);
     } catch (error) {
-      if (ownsPersistentLock) database.setSetting("maintenance.locked", false);
+      if (ownsPersistentLock) {
+        database.setSetting("maintenance.locked", false);
+        advanceVaultSnapshotGeneration();
+      }
       mutationAdmission.endExclusive(request);
       throw error;
     }
   };
   const endMaintenance = (request: FastifyRequest): void => {
     database.setSetting("maintenance.locked", false);
+    advanceVaultSnapshotGeneration();
     mutationAdmission.endExclusive(request);
   };
   let backupTimer: NodeJS.Timeout | undefined;
@@ -1183,7 +1191,8 @@ export async function buildApp(overrides: Partial<Pick<AppServices, "config" | "
     embeddingModelId: database.getSetting("models.embedding", config.models.embedding)
   });
 
-  const normalizeSetting = (key: z.infer<typeof SettingMutationSchema>["key"], value: unknown): { key: string; value: unknown } => {
+  type NormalizedSetting = { key: z.infer<typeof SettingMutationSchema>["key"]; value: unknown };
+  const normalizeSetting = (key: z.infer<typeof SettingMutationSchema>["key"], value: unknown): NormalizedSetting => {
     switch (key) {
       case "theme": return { key, value: z.enum(["light", "dark", "system"]).parse(value) };
       case "quality":
@@ -1209,6 +1218,80 @@ export async function buildApp(overrides: Partial<Pick<AppServices, "config" | "
       case "embeddingModelId":
       case "models.embedding": return { key: "models.embedding", value: EmbeddingModelIdSchema.parse(value) };
     }
+    throw new AppError("UNSUPPORTED_SETTING", "That setting is not supported by this Continuum version.", 400, false, { key });
+  };
+  const validateNormalizedSettingKeys = (settings: readonly NormalizedSetting[]): void => {
+    const canonicalKeys = new Set<string>();
+    for (const setting of settings) {
+      if (canonicalKeys.has(setting.key)) {
+        throw new AppError(
+          "DUPLICATE_SETTING_MUTATION",
+          `Setting ${setting.key} appears more than once after aliases are normalized.`,
+          400,
+          false,
+          { key: setting.key }
+        );
+      }
+      canonicalKeys.add(setting.key);
+    }
+  };
+  const validateEmbeddingSetting = (settings: readonly NormalizedSetting[]): void => {
+    const embeddingSetting = settings.find((setting) => setting.key === "models.embedding");
+    if (!embeddingSetting) return;
+    const currentModel = database.getSetting("models.embedding", config.models.embedding);
+    if (embeddingSetting.value === currentModel) return;
+    const corpus = database.connection.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM vectors) AS vectors,
+        (SELECT COUNT(*) FROM events WHERE active = 1) AS events,
+        (SELECT COUNT(*) FROM claims) AS claims,
+        (SELECT COUNT(*) FROM topic_pages WHERE lifecycle_status = 'active') AS topics,
+        (SELECT COUNT(*) FROM source_chunks) AS chunks,
+        (SELECT COUNT(*) FROM jobs WHERE type = 'embedding.index' AND status IN ('queued','running')) AS jobs
+    `).get() as Record<"vectors" | "events" | "claims" | "topics" | "chunks" | "jobs", number>;
+    if (Object.values(corpus).some((count) => Number(count) > 0)) {
+      throw new AppError(
+        "EMBEDDING_MODEL_REINDEX_REQUIRED",
+        "The embedding model can only change before the vault has embeddable content or embedding jobs. A later migration requires a cost preview and a resumable, validated corpus rebuild.",
+        409,
+        false,
+        { currentModel, requestedModel: embeddingSetting.value, corpus }
+      );
+    }
+  };
+  const applyNormalizedSettings = (settings: readonly NormalizedSetting[], timestamp: string): void => {
+    for (const setting of settings) {
+      database.setSetting(setting.key, setting.value);
+      if (setting.key !== "models.response") continue;
+      // normalizeSetting parsed this exact value before the transaction began;
+      // do not introduce a post-write validation step into the atomic batch.
+      const models = setting.value as z.infer<typeof ResponseModelsSchema>;
+      const update = database.connection.prepare("UPDATE provider_presets SET model_id = ?, updated_at = ? WHERE name = ?");
+      for (const name of ["fast", "balanced", "deep"] as const) update.run(models[name], timestamp, name);
+    }
+  };
+  const commitSettingsMutation = <Response extends Record<string, unknown>>(
+    idempotencyKey: string,
+    operation: string,
+    settings: readonly NormalizedSetting[],
+    response: () => Response
+  ): { response: Response; changed: boolean } => database.connection.transaction(() => {
+    validateNormalizedSettingKeys(settings);
+    const prior = database.idempotentResponse<Response>(idempotencyKey, operation);
+    if (prior) return { response: prior, changed: false };
+    // All parsing, alias collision checks, and corpus guards finish before the
+    // first settings or provider-preset write. BEGIN IMMEDIATE keeps the
+    // embedding-corpus snapshot stable through the eventual commit.
+    validateEmbeddingSetting(settings);
+    applyNormalizedSettings(settings, new Date().toISOString());
+    const committedResponse = response();
+    database.rememberIdempotentResponse(idempotencyKey, operation, committedResponse);
+    return { response: committedResponse, changed: true };
+  }).immediate();
+  const applyPromptTracingAfterCommit = (settings: readonly NormalizedSetting[], changed: boolean): void => {
+    if (!changed) return;
+    const tracing = settings.find((setting) => setting.key === "promptTracing.enabled");
+    if (tracing) logger.setPromptTracing(Boolean(tracing.value));
   };
   await app.register(cookie);
   await app.register(cors, {
@@ -1333,48 +1416,34 @@ export async function buildApp(overrides: Partial<Pick<AppServices, "config" | "
     };
   });
 
+  app.get("/api/v1/vault/snapshot-boundary", async () => VaultSnapshotBoundarySchema.parse({
+    generation: vaultSnapshotGeneration,
+    maintenanceLocked: database.getSetting("maintenance.locked", false),
+    vaultId: (rows(database, "SELECT id FROM vaults LIMIT 1")[0]?.id ?? null)
+  }));
+
   app.get("/api/v1/settings", async () => ({ settings: uiSettings(), raw: database.listSettings() }));
   app.put("/api/v1/settings", async (request) => {
     const body = parseBody(SettingMutationSchema, request.body);
     const setting = normalizeSetting(body.key, body.value);
-    const result = database.connection.transaction(() => {
-      const prior = database.idempotentResponse<Record<string, unknown>>(body.idempotencyKey, "settings.put");
-      if (prior) return { response: prior, changed: false };
-      if (setting.key === "models.embedding") {
-        const currentModel = database.getSetting("models.embedding", config.models.embedding);
-        if (setting.value !== currentModel) {
-          const corpus = database.connection.prepare(`
-            SELECT
-              (SELECT COUNT(*) FROM vectors) AS vectors,
-              (SELECT COUNT(*) FROM events WHERE active = 1) AS events,
-              (SELECT COUNT(*) FROM claims) AS claims,
-              (SELECT COUNT(*) FROM topic_pages WHERE lifecycle_status = 'active') AS topics,
-              (SELECT COUNT(*) FROM source_chunks) AS chunks,
-              (SELECT COUNT(*) FROM jobs WHERE type = 'embedding.index' AND status IN ('queued','running')) AS jobs
-          `).get() as Record<"vectors" | "events" | "claims" | "topics" | "chunks" | "jobs", number>;
-          if (Object.values(corpus).some((count) => Number(count) > 0)) {
-            throw new AppError(
-              "EMBEDDING_MODEL_REINDEX_REQUIRED",
-              "The embedding model can only change before the vault has embeddable content or embedding jobs. A later migration requires a cost preview and a resumable, validated corpus rebuild.",
-              409,
-              false,
-              { currentModel, requestedModel: setting.value, corpus }
-            );
-          }
-        }
-      }
-      database.setSetting(setting.key, setting.value);
-      if (setting.key === "models.response") {
-        const models = ResponseModelsSchema.parse(setting.value);
-        const update = database.connection.prepare("UPDATE provider_presets SET model_id = ?, updated_at = ? WHERE name = ?");
-        const timestamp = new Date().toISOString();
-        for (const name of ["fast", "balanced", "deep"] as const) update.run(models[name], timestamp, name);
-      }
-      const response = { key: setting.key, value: setting.value, settings: uiSettings(), raw: database.listSettings() };
-      database.rememberIdempotentResponse(body.idempotencyKey, "settings.put", response);
-      return { response, changed: true };
-    }).immediate();
-    if (result.changed && setting.key === "promptTracing.enabled") logger.setPromptTracing(Boolean(setting.value));
+    const result = commitSettingsMutation(body.idempotencyKey, "settings.put", [setting], () => ({
+      key: setting.key,
+      value: setting.value,
+      settings: uiSettings(),
+      raw: database.listSettings()
+    }));
+    applyPromptTracingAfterCommit([setting], result.changed);
+    return result.response;
+  });
+  app.put("/api/v1/settings/batch", async (request) => {
+    const body = parseBody(SettingBatchMutationSchema, request.body);
+    const settings = body.mutations.map((mutation) => normalizeSetting(mutation.key, mutation.value));
+    const result = commitSettingsMutation(body.idempotencyKey, "settings.batch.put", settings, () => ({
+      mutations: settings,
+      settings: uiSettings(),
+      raw: database.listSettings()
+    }));
+    applyPromptTracingAfterCommit(settings, result.changed);
     return result.response;
   });
 
@@ -1915,7 +1984,7 @@ export async function buildApp(overrides: Partial<Pick<AppServices, "config" | "
         stableHash(`projection.sync:user-topic:${updated.id}:${updated.revision}:${stableHash(markdown)}`),
         { topicIds: [updated.id], reason: "user_topic_edit" }
       );
-      enqueueTopicEmbedding(updated);
+      enqueueTopicEmbedding({ id: updated.id, revision: updated.revision, markdown });
       database.rememberIdempotentResponse(patch.idempotencyKey, "topics.patch", updated);
       return updated;
     })();
@@ -1929,10 +1998,10 @@ export async function buildApp(overrides: Partial<Pick<AppServices, "config" | "
     const response = database.connection.transaction(() => {
       const created = database.upsertTopicRevision({ ...body, openQuestions: body.openQuestions ?? [], tags: body.tags ?? [], authorType: "user", promptVersion: "user-edit-v1" });
       enqueueProjectionSync(
-        stableHash(`projection.sync:user-topic:${created.id}:${created.revision}:${stableHash(created.markdown)}`),
+        stableHash(`projection.sync:user-topic:${created.id}:${created.revision}:${stableHash(body.markdown)}`),
         { topicIds: [created.id], reason: "user_topic_create" }
       );
-      enqueueTopicEmbedding(created);
+      enqueueTopicEmbedding({ id: created.id, revision: created.revision, markdown: body.markdown });
       database.rememberIdempotentResponse(body.idempotencyKey, "topics.create", created);
       return created;
     })();
@@ -2189,8 +2258,8 @@ export async function buildApp(overrides: Partial<Pick<AppServices, "config" | "
         if (!snapshot || snapshot.topicId !== guard.expectedTopicId || snapshot.stateHash !== guard.stateHash) {
           staleProposal("A claim rendered by this proposal changed after planning.");
         }
-        const claim = database.getClaim(guard.claimId, true);
-        if (!claim) staleProposal("A guarded claim disappeared after planning.");
+        const claim = database.getClaim(guard.claimId, true)
+          ?? staleProposal("A guarded claim disappeared after planning.");
         guardedClaims.set(guard.claimId, claim);
         if (guard.assignToTopicId !== null && (
           !changedClaimIds.has(guard.claimId)
@@ -2250,13 +2319,14 @@ export async function buildApp(overrides: Partial<Pick<AppServices, "config" | "
           outputRevisionIds.add(output.revisionId);
           const page = database.connection.prepare(`
             SELECT title, slug, active_revision, lifecycle_status FROM topic_pages WHERE id = ?
-          `).get(output.topicId) as { title: string; slug: string; active_revision: number; lifecycle_status: string } | undefined;
+          `).get(output.topicId) as { title: string; slug: string; active_revision: number; lifecycle_status: string } | undefined
+            ?? staleProposal("A candidate page or revision identity changed after planning.");
           const revision = database.connection.prepare(`
             SELECT topic_id, revision_number, author_type, prompt_version, generation_inputs_json
             FROM topic_page_revisions WHERE id = ?
-          `).get(output.revisionId) as { topic_id: string; revision_number: number; author_type: string; prompt_version: string; generation_inputs_json: string } | undefined;
-          if (!page || !revision
-            || revision.topic_id !== output.topicId
+          `).get(output.revisionId) as { topic_id: string; revision_number: number; author_type: string; prompt_version: string; generation_inputs_json: string } | undefined
+            ?? staleProposal("A candidate page or revision identity changed after planning.");
+          if (revision.topic_id !== output.topicId
             || revision.revision_number !== output.revision
             || revision.author_type !== "model"
             || revision.prompt_version !== "topic-shard-proposal-v1"
@@ -2677,6 +2747,12 @@ export async function buildApp(overrides: Partial<Pick<AppServices, "config" | "
       database.setSetting("memory.pendingTopicProposals", remaining);
       const resolved = database.getSetting<Array<Record<string, unknown>>>("memory.resolvedTopicProposals", []);
       database.setSetting("memory.resolvedTopicProposals", [...resolved, { ...proposal, status: "rejected", resolvedAt: timestamp }].slice(-5_000));
+      database.enqueueJob(
+        "memory.rebuild",
+        stableHash(`memory.rebuild:legacy-proposal-reject:${proposal.id}`),
+        { topicIds: [proposal.topicId], reason: "legacy_topic_proposal_reject", proposalId: proposal.id },
+        20
+      );
       const rejectedResponse = { resolved: true as const, action: body.action, proposalId: proposal.id, topicIds: [] as string[] };
       database.rememberIdempotentResponse(body.idempotencyKey, operation, rejectedResponse);
       return rejectedResponse;
@@ -3030,22 +3106,49 @@ export async function buildApp(overrides: Partial<Pick<AppServices, "config" | "
     const prior = database.idempotentResponse<Record<string, unknown>>(body.idempotencyKey, "vault.import.commit");
     if (prior) return prior;
     let maintenanceStarted = false;
+    let recoveryRequired = false;
+    let promptTracingBeforeImport = false;
     try {
       await beginMaintenance(request);
       maintenanceStarted = true;
+      promptTracingBeforeImport = database.getSetting("promptTracing.enabled", false);
       secretGrants.clear();
-      const response = await maintenance.importVerifiedToken(body.verificationToken, body.mode);
-      // Machine-local authorization and raw prompt traces never cross a vault
-      // replacement. Drain old trace writes before removing their files, then
-      // follow the newly imported (non-portable, therefore false) consent.
-      logger.setPromptTracing(database.getSetting("promptTracing.enabled", false));
+      // Raw prompt traces are machine-local and non-portable. Purge and fsync
+      // them before the database replacement can commit, so the durable API
+      // success fence can never coexist with files from the prior vault.
+      logger.setPromptTracing(false);
       await logger.flush();
       for (const entry of await readdirNamesIfExists(config.logsDir)) {
         if (entry.endsWith(".jsonl")) await unlinkIfExists(join(config.logsDir, entry));
       }
-      database.rememberIdempotentResponse(body.idempotencyKey, "vault.import.commit", response);
-      return response;
+      await syncDirectory(config.logsDir);
+      await maintenance.importVerifiedToken(body.verificationToken, body.mode, {
+        idempotencyKey: body.idempotencyKey,
+        operation: "vault.import.commit"
+      });
+      // Follow the newly imported consent (non-portable, therefore false).
+      logger.setPromptTracing(database.getSetting("promptTracing.enabled", false));
+      const durableResponse = database.idempotentResponse<Record<string, unknown>>(body.idempotencyKey, "vault.import.commit");
+      if (!durableResponse) throw new Error("The completed vault import did not publish its durable API response.");
+      return durableResponse;
     } catch (error) {
+      if (error instanceof VaultImportRecoveryRequiredError) {
+        recoveryRequired = true;
+        logger.setPromptTracing(false);
+        logger.error("vault import requires restart recovery", {
+          databaseCommitted: error.databaseCommitted,
+          error: error.cause instanceof Error ? error.cause.message : String(error.cause)
+        });
+        throw new AppError(
+          error.databaseCommitted ? "VAULT_IMPORT_RECOVERY_REQUIRED" : "VAULT_IMPORT_ROLLBACK_RECOVERY_REQUIRED",
+          error.databaseCommitted
+            ? "The imported database committed, but private-file or projection finalization did not finish. Continuum remains locked; restart the local app to resume the import safely."
+            : "The vault replacement rolled back, but private staged-file cleanup did not finish. Continuum remains locked; restart the local app to finish cleanup before retrying the import.",
+          503,
+          true
+        );
+      }
+      logger.setPromptTracing(database.getSetting("promptTracing.enabled", promptTracingBeforeImport));
       if (error instanceof VaultBundleValidationError) throw new AppError("VAULT_BUNDLE_INVALID", error.message, 400);
       if (error instanceof VaultImportStorageError) throw new AppError("INSUFFICIENT_IMPORT_STORAGE", error.message, 507, true, { requiredBytes: error.requiredBytes, availableBytes: error.availableBytes });
       if (error instanceof VaultVerificationTokenError) {
@@ -3058,7 +3161,7 @@ export async function buildApp(overrides: Partial<Pick<AppServices, "config" | "
       }
       throw error;
     } finally {
-      if (maintenanceStarted) endMaintenance(request);
+      if (maintenanceStarted && !recoveryRequired) endMaintenance(request);
     }
   });
   const publicBackup = (record: Record<string, unknown>) => {

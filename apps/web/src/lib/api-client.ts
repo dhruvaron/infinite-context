@@ -32,6 +32,7 @@ import {
   EventRevisionsListResponseSchema,
   EventsListResponseSchema,
   ExportVaultResponseSchema,
+  HealthResponseSchema,
   ImportVaultResponseSchema,
   MemoryJobsListResponseSchema,
   MutationRecoveryResponseSchema,
@@ -39,12 +40,16 @@ import {
   RegenerateEventResponseSchema,
   RevokeWorkspaceResponseSchema,
   RetryMemoryJobResponseSchema,
+  RuntimeStateSchema,
   RunsListResponseSchema,
   RunStreamWireEventSchema,
+  SettingBatchMutationResponseSchema,
+  SettingsResponseSchema,
   SourceDetailResponseSchema,
   StartMemoryLintResponseSchema,
   TopicDetailSchema,
   TopicsListResponseSchema,
+  VaultSnapshotBoundarySchema,
   VaultDeletionImpactSchema,
   WorkspacesListResponseSchema,
   WorkspaceSchema
@@ -220,6 +225,14 @@ export class ContinuumApi {
     this.vaultReadController = new AbortController();
   }
 
+  resetVaultSettingsCache(): void {
+    this.settingsCache = {
+      ...DEFAULT_SETTINGS,
+      responseModelIds: { ...DEFAULT_SETTINGS.responseModelIds }
+    };
+    try { localStorage.removeItem(this.settingsStorageKey); } catch { /* The in-memory cache is still cleared. */ }
+  }
+
   private headers(extra?: HeadersInit) {
     const headers = new Headers(extra);
     headers.set("Accept", "application/json");
@@ -278,12 +291,42 @@ export class ContinuumApi {
     try { localStorage.setItem(this.settingsStorageKey, JSON.stringify(settings)); } catch { /* Preferences remain in memory if storage is unavailable. */ }
   }
 
+  private resolveSettings(serverSettings: Partial<AppSettings>, rawSettings: Record<string, unknown>, base?: AppSettings): AppSettings {
+    const localSettings = this.readLocalSettings();
+    const theme = serverSettings.theme ?? rawSettings.theme;
+    const quality = serverSettings.quality ?? rawSettings["quality.default"];
+    return {
+      ...demoBootstrap.settings,
+      ...localSettings,
+      ...base,
+      ...serverSettings,
+      ...(theme === "light" || theme === "dark" || theme === "system" ? { theme } : {}),
+      ...(quality === "fast" || quality === "balanced" || quality === "deep" ? { quality } : {}),
+      ...(typeof rawSettings["memory.enabled"] === "boolean" ? { memoryPaused: !rawSettings["memory.enabled"] } : {}),
+      ...(typeof rawSettings["webSearch.enabled"] === "boolean" ? { webSearchEnabled: rawSettings["webSearch.enabled"] } : {}),
+      ...(typeof rawSettings["onboarding.complete"] === "boolean" ? { onboardingComplete: rawSettings["onboarding.complete"] } : {}),
+      ...(typeof rawSettings["system.instructions"] === "string" ? { systemInstructions: rawSettings["system.instructions"] } : {}),
+      ...(typeof rawSettings["ui.showSourceChips"] === "boolean" ? { showSourceChips: rawSettings["ui.showSourceChips"] } : {}),
+      ...(typeof rawSettings["developer.traceMode"] === "boolean" ? { developerOverrides: rawSettings["developer.traceMode"] } : {}),
+      ...(typeof rawSettings["promptTracing.enabled"] === "boolean" ? { promptTracingEnabled: rawSettings["promptTracing.enabled"] } : {}),
+      ...(rawSettings["models.response"] && typeof rawSettings["models.response"] === "object" && !Array.isArray(rawSettings["models.response"])
+        ? { responseModelIds: rawSettings["models.response"] as AppSettings["responseModelIds"] }
+        : {}),
+      ...(typeof rawSettings["models.extraction"] === "string" ? { extractionModelId: rawSettings["models.extraction"] } : {}),
+      ...(typeof rawSettings["models.embedding"] === "string" ? { embeddingModelId: rawSettings["models.embedding"] } : {})
+    };
+  }
+
   async getBudgetSummary(): Promise<ContractBudgetSummary> {
     return this.request<ContractBudgetSummary>("/budget", {}, BudgetSummarySchema);
   }
 
   async bootstrap(): Promise<BootstrapData> {
     try {
+      const boundaryBefore = await this.request<{ generation: number; maintenanceLocked: boolean; vaultId: string | null }>("/vault/snapshot-boundary", {}, VaultSnapshotBoundarySchema);
+      if (boundaryBefore.maintenanceLocked) {
+        throw new ApiRequestError("The local vault is completing maintenance. Its prior verified view remains read-only until one canonical snapshot can be loaded.", "MAINTENANCE_LOCKED", true, 423);
+      }
       const health = await this.request<{
         status?: string;
         providerConfigured?: boolean;
@@ -297,10 +340,10 @@ export class ContinuumApi {
           schemaVersion?: number;
         };
         version?: string;
-      }>("/health", { timeoutMs: 1800 });
-      const [runtimeResult, settingsResult, budgetResult, eventsResult, runsResult, topicsResult, claimsResult, graphResult, traceResult, callsResult, jobsResult, lintResult, pinsResult, proposalsResult] = await Promise.allSettled([
-        this.request<Partial<BootstrapData["runtime"]> & { mockProvider?: boolean; vectorMode?: string }>("/runtime"),
-        this.request<{ settings: Partial<AppSettings>; raw?: Record<string, unknown> }>("/settings"),
+      }>("/health", { timeoutMs: 1800 }, HealthResponseSchema);
+      const [runtimeResult, settingsResult, budgetResult, eventsResult, activeRunsResult, latestRunResult, topicsResult, claimsResult, graphResult, traceResult, callsResult, jobsResult, lintResult, pinsResult, proposalsResult] = await Promise.allSettled([
+        this.request<Partial<BootstrapData["runtime"]> & { mockProvider?: boolean; vectorMode?: string }>("/runtime", {}, RuntimeStateSchema),
+        this.request<{ settings: Partial<AppSettings>; raw?: Record<string, unknown> }>("/settings", {}, SettingsResponseSchema),
         this.request<{
           hardLimitUsd?: number;
           spentUsd?: number;
@@ -315,12 +358,13 @@ export class ContinuumApi {
           warningThresholdUsd?: number;
           ledgerCreatedAt?: string | null;
           warningThresholdsReached?: Array<20 | 50 | 75 | 90>;
-        }>("/budget"),
-        this.request<{ events: BootstrapData["events"]; nextCursor: string | null }>("/events?limit=100"),
+        }>("/budget", {}, BudgetSummarySchema),
+        this.request<{ events: BootstrapData["events"]; nextCursor: string | null }>("/events?limit=100", {}, EventsListResponseSchema),
         this.request<{ runs: Array<Record<string, unknown>>; nextCursor: string | null }>("/runs?status=active&limit=100", {}, RunsListResponseSchema),
-        this.request<{ topics: BootstrapData["topics"]; nextCursor: string | null }>("/topics?limit=50"),
-        this.request<{ claims: BootstrapData["claims"]; nextCursor: string | null }>("/claims?limit=100"),
-        this.request<GraphResponse>("/graph?limit=300"),
+        this.request<{ runs: Array<Record<string, unknown>>; nextCursor: string | null }>("/runs?limit=1", {}, RunsListResponseSchema),
+        this.request<{ topics: BootstrapData["topics"]; nextCursor: string | null }>("/topics?limit=50", {}, TopicsListResponseSchema),
+        this.request<{ claims: BootstrapData["claims"]; nextCursor: string | null }>("/claims?limit=100", {}, ClaimsListResponseSchema),
+        this.request<GraphResponse>("/graph?limit=300", {}, GraphResponseSchema),
         this.request<{ trace: unknown }>("/retrieval-traces/latest"),
         this.request<{ calls: Array<Record<string, unknown>> }>("/model-calls?limit=20"),
         this.request<{ jobs: Array<Record<string, unknown>> }>("/memory-jobs"),
@@ -329,34 +373,32 @@ export class ContinuumApi {
         this.request<{ proposals: Array<Record<string, unknown>> }>("/memory-proposals?limit=50")
       ]);
       const settled = <T,>(result: PromiseSettledResult<T>, fallback: T) => result.status === "fulfilled" ? result.value : fallback;
-      const runtime = settled(runtimeResult, {});
-      const settingsPayload = settled(settingsResult, { settings: {}, raw: {} });
-      const serverSettings = settingsPayload.settings;
-      const rawSettings = settingsPayload.raw ?? serverSettings as Record<string, unknown>;
-      const localSettings = this.readLocalSettings();
-      const theme = serverSettings.theme ?? rawSettings.theme;
-      const quality = serverSettings.quality ?? rawSettings["quality.default"];
-      const resolvedSettings: AppSettings = {
-        ...demoBootstrap.settings,
-        ...localSettings,
-        ...serverSettings,
-        ...(theme === "light" || theme === "dark" || theme === "system" ? { theme } : {}),
-        ...(quality === "fast" || quality === "balanced" || quality === "deep" ? { quality } : {}),
-        ...(typeof rawSettings["memory.enabled"] === "boolean" ? { memoryPaused: !rawSettings["memory.enabled"] } : {}),
-        ...(typeof rawSettings["webSearch.enabled"] === "boolean" ? { webSearchEnabled: rawSettings["webSearch.enabled"] } : {}),
-        ...(typeof rawSettings["onboarding.complete"] === "boolean" ? { onboardingComplete: rawSettings["onboarding.complete"] } : {}),
-        ...(typeof rawSettings["promptTracing.enabled"] === "boolean" ? { promptTracingEnabled: rawSettings["promptTracing.enabled"] } : {})
+      const core = <T,>(label: string, result: PromiseSettledResult<T>): T => {
+        if (result.status === "fulfilled") return result.value;
+        throw new ApiRequestError(`The local vault could not load ${label}. The last verified view remains read-only until every core read succeeds.`, "BOOTSTRAP_INCOMPLETE", true, result.reason instanceof ApiRequestError ? result.reason.status : 0);
       };
-      const budget = settled(budgetResult, {});
+      const runtime = core("runtime state", runtimeResult);
+      const initialSettingsPayload = core("settings", settingsResult);
+      const budget = core("the budget ledger", budgetResult);
+      const eventsPage = core("conversation events", eventsResult);
+      const activeRunPage = core("active runs", activeRunsResult);
+      const latestRunPage = core("latest run recovery state", latestRunResult);
+      const topicsPage = core("topic pages", topicsResult);
+      const claimsPage = core("claims", claimsResult);
+      const graph = core("the knowledge graph", graphResult);
+      const initialRawSettings = initialSettingsPayload.raw ?? initialSettingsPayload.settings as Record<string, unknown>;
+      if (initialRawSettings["maintenance.locked"] === true) {
+        throw new ApiRequestError("The local vault is completing maintenance. Its prior verified view remains read-only until one canonical snapshot can be loaded.", "MAINTENANCE_LOCKED", true, 423);
+      }
+      const serverSettings = initialSettingsPayload.settings;
+      const rawSettings = initialRawSettings;
+      const resolvedSettings = this.resolveSettings(serverSettings, rawSettings);
       const vectorMode = runtime.vectorMode ?? health.database?.vectorMode;
       const vectorStrategy = runtime.vectorStrategy ?? health.database?.vectorStrategy;
       const vectorVersion = runtime.vectorVersion ?? health.database?.vectorVersion;
       const vectorFallbackLimit = runtime.vectorFallbackLimit ?? health.database?.vectorFallbackLimit;
       const vectorLoadStatus = runtime.vectorLoadStatus ?? health.database?.vectorLoadStatus;
       const providerConfigured = health.providerConfigured === true || runtime.mockProvider === true;
-      this.connected = true;
-      this.settingsCache = resolvedSettings;
-      this.writeLocalSettings(resolvedSettings);
       const callRows = settled(callsResult, { calls: [] }).calls;
       const latestRunId = callRows.find((call) => typeof call.runId === "string")?.runId;
       const latestTrace = settled(traceResult, { trace: null }).trace;
@@ -366,6 +408,20 @@ export class ContinuumApi {
       const fallbackTrace = fallbackTracePayload && typeof fallbackTracePayload === "object" && "trace" in fallbackTracePayload
         ? (fallbackTracePayload as { trace: unknown }).trace
         : fallbackTracePayload;
+      // A maintenance window advances the generation both when it opens and
+      // when it closes. This final fence intentionally follows every bootstrap
+      // read, including the optional exact-trace fallback, so no result can mix
+      // vault generations before the client publishes or caches it.
+      const boundaryAfter = await this.request<{ generation: number; maintenanceLocked: boolean; vaultId: string | null }>("/vault/snapshot-boundary", {}, VaultSnapshotBoundarySchema);
+      if (boundaryAfter.maintenanceLocked) {
+        throw new ApiRequestError("The local vault is completing maintenance. Its prior verified view remains read-only until one canonical snapshot can be loaded.", "MAINTENANCE_LOCKED", true, 423);
+      }
+      if (boundaryAfter.generation !== boundaryBefore.generation || boundaryAfter.vaultId !== boundaryBefore.vaultId) {
+        throw new ApiRequestError("The local vault changed while its canonical view was loading. The prior verified view remains read-only until one stable snapshot can be loaded.", "VAULT_SNAPSHOT_CHANGED", true, 409);
+      }
+      this.connected = true;
+      this.settingsCache = resolvedSettings;
+      this.writeLocalSettings(resolvedSettings);
       const traceCandidate = latestTrace ?? fallbackTrace;
       const parsedTrace = RetrievalTraceSchema.safeParse(traceCandidate);
       const trace = parsedTrace.success ? parsedTrace.data : null;
@@ -416,19 +472,28 @@ export class ContinuumApi {
       });
       const version = runtime.version ?? health.version;
       const lastMemoryUpdate = runtime.lastMemoryUpdate ?? jobs[0]?.updatedAt;
-      const eventsPage = settled(eventsResult, { events: [], nextCursor: null });
-      const activeRuns = settled(runsResult, { runs: [], nextCursor: null }).runs.flatMap((run) => {
+      const activeRuns: BootstrapData["activeRuns"] = activeRunPage.runs.flatMap((run) => {
         const status = String(run.status);
         if (status !== "pending" && status !== "retrieving" && status !== "streaming") return [];
         return [{
           id: String(run.id),
-          status,
+          status: status as BootstrapData["activeRuns"][number]["status"],
           userEventId: typeof run.userEventId === "string" ? run.userEventId : null,
           assistantEventId: typeof run.assistantEventId === "string" ? run.assistantEventId : null,
           ...(typeof run.createdAt === "string" ? { createdAt: run.createdAt } : {})
         }];
       });
+      const latestFailedRun = latestRunPage.runs.flatMap((run) => String(run.status) === "failed" ? [{
+        id: String(run.id),
+        status: "failed" as const,
+        userEventId: typeof run.userEventId === "string" ? run.userEventId : null,
+        assistantEventId: typeof run.assistantEventId === "string" ? run.assistantEventId : null,
+        errorCode: typeof run.errorCode === "string" ? run.errorCode : null,
+        ...(typeof run.createdAt === "string" ? { createdAt: run.createdAt } : {}),
+        ...(typeof run.completedAt === "string" || run.completedAt === null ? { completedAt: run.completedAt } : {})
+      }] : [])[0] ?? null;
       return {
+        vaultBoundary: boundaryAfter,
         runtime: {
           ...demoBootstrap.runtime,
           mode: runtime.mode === "degraded" ? "degraded" : "connected",
@@ -469,9 +534,10 @@ export class ContinuumApi {
         events: eventsPage.events,
         eventsNextCursor: eventsPage.nextCursor,
         activeRuns,
-        topics: settled(topicsResult, { topics: [], nextCursor: null }).topics,
-        claims: settled(claimsResult, { claims: [], nextCursor: null }).claims,
-        graph: settled(graphResult, { nodes: [], edges: [], focusId: null, truncated: false }),
+        latestFailedRun,
+        topics: topicsPage.topics,
+        claims: claimsPage.claims,
+        graph,
         activeMemories: memories,
         attention,
         memoryProposals: settled(proposalsResult, { proposals: [] }).proposals.map(normalizeTopicProposal),
@@ -497,32 +563,10 @@ export class ContinuumApi {
           }
         }
       };
-    } catch {
+    } catch (error) {
       this.connected = false;
-      const settings = { ...DEFAULT_SETTINGS, ...this.readLocalSettings() };
-      this.settingsCache = settings;
-      return {
-        runtime: {
-          mode: "offline",
-          apiReachable: false,
-          providerReachable: false,
-          vectorSearch: "unavailable",
-          memoryQueue: "paused",
-          message: "The local Continuum service is unavailable. No vault data was substituted."
-        },
-        settings,
-        budget: { totalUsd: 0, reservedUsd: 0, allocatedUsd: 0, availableUsd: 100, activeReservations: 0, capUsd: 100, warningThresholdUsd: 20, inputTokens: 0, outputTokens: 0, extractionTokens: 0, embeddingTokens: 0, ledgerCreatedAt: null, warningThresholdsReached: [] },
-        events: [],
-        eventsNextCursor: null,
-        activeRuns: [],
-        topics: [],
-        claims: [],
-        graph: { nodes: [], edges: [], focusId: null, truncated: false },
-        activeMemories: [],
-        attention: [],
-        memoryProposals: [],
-        debug: { trace: null, contextPacket: null, modelCalls: [], toolCalls: [], jobs: [], promptVersion: "—", schemaVersion: "—", versions: emptyVersions() }
-      };
+      if (error instanceof ApiRequestError) throw error;
+      throw new ApiRequestError("The local vault could not be loaded completely. The last verified view remains read-only until every core read succeeds.", "BOOTSTRAP_INCOMPLETE", true);
     }
   }
 
@@ -542,17 +586,17 @@ export class ContinuumApi {
     if (changed("responseModelIds")) mutations.push({ key: "models.response", value: settings.responseModelIds });
     if (changed("extractionModelId")) mutations.push({ key: "models.extraction", value: settings.extractionModelId });
     if (changed("embeddingModelId")) mutations.push({ key: "models.embedding", value: settings.embeddingModelId });
-    for (const mutation of mutations) {
-      const idempotencyKey = crypto.randomUUID();
-      await this.request<{ key: string; value: unknown }>("/settings", {
-        method: "PUT",
-        headers: this.mutationHeaders({ "Content-Type": "application/json" }, idempotencyKey),
-        body: JSON.stringify({ ...mutation, idempotencyKey })
-      });
-    }
-    this.settingsCache = latest;
-    this.writeLocalSettings(latest);
-    return latest;
+    if (!mutations.length) return this.settingsCache;
+    const idempotencyKey = crypto.randomUUID();
+    const payload = await this.request<{ settings: Partial<AppSettings>; raw: Record<string, unknown> }>("/settings/batch", {
+      method: "PUT",
+      headers: this.mutationHeaders({ "Content-Type": "application/json" }, idempotencyKey),
+      body: JSON.stringify({ mutations, idempotencyKey })
+    }, SettingBatchMutationResponseSchema);
+    const saved = this.resolveSettings(payload.settings, payload.raw, latest);
+    this.settingsCache = saved;
+    this.writeLocalSettings(saved);
+    return saved;
   }
 
   async configureApiKey(apiKey: string) {
@@ -679,42 +723,55 @@ export class ContinuumApi {
   }
 
   async streamRun(runId: string, handlers: StreamHandlers, signal?: AbortSignal, options: StreamRunOptions = {}) {
-    const seenEventIds = new Set<string>();
     let lastEventId = options.lastEventId ?? null;
     if (lastEventId !== null && !isDurableSseEventId(lastEventId)) throw new ApiRequestError("The saved response cursor is invalid.", "INVALID_STREAM_CURSOR", false);
+    const scopeSignal = this.vaultReadController.signal;
+    const streamController = new AbortController();
+    const upstreamSignals = [signal, scopeSignal].filter((candidate): candidate is AbortSignal => Boolean(candidate));
+    const abortStream = () => streamController.abort();
+    for (const upstream of upstreamSignals) {
+      if (upstream.aborted) streamController.abort();
+      else upstream.addEventListener("abort", abortStream, { once: true });
+    }
+    const effectiveSignal = streamController.signal;
+    const seenEventIds = new Set<string>();
     const maximumAttempts = options.maxReconnectAttempts ?? 20;
     const baseDelay = options.reconnectBaseDelayMs ?? 200;
     const maximumDelay = options.reconnectMaximumDelayMs ?? 5_000;
     let reconnectAttempt = 0;
-    while (true) {
-      if (signal?.aborted) throw new DOMException("The operation was aborted.", "AbortError");
-      const cursorBeforeAttempt = lastEventId;
-      try {
-        const headers = this.headers();
-        headers.set("Accept", "text/event-stream");
-        if (lastEventId !== null) headers.set("Last-Event-ID", lastEventId);
-        const response = await fetch(`${this.baseUrl}/runs/${encodeURIComponent(runId)}/stream`, { headers, credentials: "include", signal: signal ?? null });
-        if (!response.ok) {
-          const retryable = response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500;
-          throw new ApiRequestError(`Unable to stream response (${response.status}).`, "STREAM_FAILED", retryable, response.status);
+    try {
+      while (true) {
+        if (effectiveSignal.aborted) throw new DOMException("The operation was aborted.", "AbortError");
+        const cursorBeforeAttempt = lastEventId;
+        try {
+          const headers = this.headers();
+          headers.set("Accept", "text/event-stream");
+          if (lastEventId !== null) headers.set("Last-Event-ID", lastEventId);
+          const response = await fetch(`${this.baseUrl}/runs/${encodeURIComponent(runId)}/stream`, { headers, credentials: "include", signal: effectiveSignal });
+          if (!response.ok) {
+            const retryable = response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500;
+            throw new ApiRequestError(`Unable to stream response (${response.status}).`, "STREAM_FAILED", retryable, response.status);
+          }
+          const result = await consumeSseStream(response, {
+            ...handlers,
+            onCursor: (id) => { lastEventId = id; handlers.onCursor?.(id); }
+          }, { afterEventId: lastEventId, seenEventIds });
+          lastEventId = result.lastEventId;
+          if (result.terminal) return result;
+        } catch (error) {
+          if (effectiveSignal.aborted) throw new DOMException("The operation was aborted.", "AbortError");
+          if (error instanceof DOMException && error.name === "AbortError") throw error;
+          if (error instanceof ApiRequestError && !error.retryable) throw error;
         }
-        const result = await consumeSseStream(response, {
-          ...handlers,
-          onCursor: (id) => { lastEventId = id; handlers.onCursor?.(id); }
-        }, { afterEventId: lastEventId, seenEventIds });
-        lastEventId = result.lastEventId;
-        if (result.terminal) return result;
-      } catch (error) {
-        if (signal?.aborted) throw new DOMException("The operation was aborted.", "AbortError");
-        if (error instanceof DOMException && error.name === "AbortError") throw error;
-        if (error instanceof ApiRequestError && !error.retryable) throw error;
+        if (lastEventId !== cursorBeforeAttempt) reconnectAttempt = 0;
+        reconnectAttempt += 1;
+        if (reconnectAttempt > maximumAttempts) throw new ApiRequestError("The response stream stayed unavailable after repeated reconnect attempts.", "STREAM_INTERRUPTED", true);
+        handlers.onReconnect?.({ attempt: reconnectAttempt, lastEventId });
+        const delay = Math.min(maximumDelay, baseDelay * 2 ** Math.min(reconnectAttempt - 1, 6));
+        await waitForReconnect(delay, effectiveSignal);
       }
-      if (lastEventId !== cursorBeforeAttempt) reconnectAttempt = 0;
-      reconnectAttempt += 1;
-      if (reconnectAttempt > maximumAttempts) throw new ApiRequestError("The response stream stayed unavailable after repeated reconnect attempts.", "STREAM_INTERRUPTED", true);
-      handlers.onReconnect?.({ attempt: reconnectAttempt, lastEventId });
-      const delay = Math.min(maximumDelay, baseDelay * 2 ** Math.min(reconnectAttempt - 1, 6));
-      await waitForReconnect(delay, signal);
+    } finally {
+      for (const upstream of upstreamSignals) upstream.removeEventListener("abort", abortStream);
     }
   }
 
@@ -825,7 +882,7 @@ export class ContinuumApi {
     if (pending.remote?.status === "failed") {
       throw new ApiRequestError(`${pending.file.name} could not be processed. Remove and reattach it before retrying.`, pending.fileUnavailable ? "ATTACHMENT_FILE_UNAVAILABLE" : "ATTACHMENT_REATTACH_REQUIRED", false);
     }
-    const uploaded = pending.remote && pending.remote.status !== "failed" ? pending.remote : await this.uploadAttachment(pending);
+    const uploaded = pending.remote ?? await this.uploadAttachment(pending);
     pending.remote = uploaded;
     try {
       const ready = await this.waitForAttachmentReady(uploaded);
@@ -943,8 +1000,7 @@ export class ContinuumApi {
     return this.request<{ valid: boolean; verificationToken: string; archiveChecksum: string; size: number; expiresAt: string; manifest?: { createdAt?: string; counts?: Record<string, number> } }>("/import", { method: "POST", headers: this.mutationHeaders(undefined, idempotencyKey), body, timeoutMs: null }, ImportVaultResponseSchema);
   }
 
-  async commitVerifiedVaultImport(verificationToken: string, mode: "replace" | "fresh") {
-    const idempotencyKey = crypto.randomUUID();
+  async commitVerifiedVaultImport(verificationToken: string, mode: "replace" | "fresh", idempotencyKey: string = crypto.randomUUID()) {
     return this.request<{ valid: boolean; replaced?: boolean; manifest?: { createdAt?: string; counts?: Record<string, number> } }>("/import/commit", {
       method: "POST",
       headers: this.mutationHeaders({ "Content-Type": "application/json" }, idempotencyKey),
@@ -1060,10 +1116,6 @@ function readNumber(record: Record<string, unknown>, ...keys: string[]) {
 function parseJsonValue(value: unknown) {
   if (typeof value !== "string") return value;
   try { return JSON.parse(value) as unknown; } catch { return value; }
-}
-
-function emptyVersions(): DebugSnapshot["versions"] {
-  return { prompt: "—", schema: "—", retrieval: "—", reranker: "—", contextBuilder: "—", vector: "—", parser: "—", chunker: "—", responseModel: "—", embeddingModel: "—" };
 }
 
 function normalizeTopicProposal(record: Record<string, unknown>): TopicProposal {

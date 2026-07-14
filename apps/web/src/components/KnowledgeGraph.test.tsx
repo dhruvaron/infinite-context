@@ -22,7 +22,7 @@ describe("focused graph", () => {
     const { container } = render(<KnowledgeGraph graph={demoBootstrap.graph} topics={demoBootstrap.topics} onClose={vi.fn()} onRequestGraph={request} onNavigate={vi.fn()} onEvidence={evidence} onEditTopic={vi.fn()} />);
     expect(container.querySelector("svg.graph-canvas")).toHaveAttribute("aria-hidden", "true");
     expect(screen.getByText("Entity")).toBeVisible();
-    await user.click(screen.getByText(/accessible graph list/i));
+    await user.click(screen.getByText(/accessible graph list/i, { selector: "summary" }));
     expect(screen.getByRole("region", { name: /graph relationships/i })).toBeVisible();
     expect(screen.getByText(/relationships and evidence/i)).toBeVisible();
     expect(screen.getByRole("button", { name: /continuum project, entity/i })).toBeInTheDocument();

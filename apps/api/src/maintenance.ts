@@ -99,6 +99,20 @@ export class VaultImportStorageError extends Error {
   }
 }
 
+export class VaultImportRecoveryRequiredError extends Error {
+  readonly databaseCommitted: boolean;
+  constructor(cause: unknown, databaseCommitted = true) {
+    super(
+      databaseCommitted
+        ? "The imported database committed, but durable file finalization is incomplete."
+        : "The import database transaction rolled back, but durable staged-file cleanup is incomplete.",
+      { cause }
+    );
+    this.name = "VaultImportRecoveryRequiredError";
+    this.databaseCommitted = databaseCommitted;
+  }
+}
+
 const RETRYABLE_IMPORT_IO_CODES = new Set(["EBUSY", "EDQUOT", "EIO", "EMFILE", "ENFILE", "ENOSPC", "EROFS", "ETIMEDOUT"]);
 
 /** Returns the first filesystem error code in an error/cause chain. */
@@ -123,7 +137,7 @@ export function isVaultImportCapacityError(error: unknown): boolean {
   return code === "ENOSPC" || code === "EDQUOT";
 }
 
-type VaultVerificationTokenErrorCode = "INVALID" | "NOT_FOUND" | "EXPIRED" | "IN_USE";
+type VaultVerificationTokenErrorCode = "INVALID" | "NOT_FOUND" | "EXPIRED" | "IN_USE" | "CONSUMED";
 
 export class VaultVerificationTokenError extends Error {
   readonly code: VaultVerificationTokenErrorCode;
@@ -290,10 +304,27 @@ type ImportOperationRow = {
   payload_json: string;
 };
 
+type OrderedImportOperationRow = ImportOperationRow & { journal_rowid: number };
+
+export type ImportApiRecovery = {
+  idempotencyKey: string;
+  operation: "vault.import.commit";
+  verificationToken?: string;
+};
+
+const ImportApiRecoverySchema = z.object({
+  idempotencyKey: z.string().min(8).max(200),
+  operation: z.literal("vault.import.commit"),
+  verificationToken: z.string().uuid().optional(),
+  verificationTokenConsumedAt: z.string().datetime().optional(),
+  response: z.record(z.unknown()).optional()
+}).strict();
+
 const ImportJournalPayloadSchema = z.object({
   oldHashes: z.array(HashSchema).max(MAX_ROWS_PER_TABLE),
   newlyCreatedHashes: z.array(HashSchema).max(MAX_ROWS_PER_TABLE),
-  retainedHashes: z.array(HashSchema).max(MAX_ROWS_PER_TABLE)
+  retainedHashes: z.array(HashSchema).max(MAX_ROWS_PER_TABLE),
+  apiRecovery: ImportApiRecoverySchema.optional()
 }).strict();
 
 type ImportJournalPayload = z.infer<typeof ImportJournalPayloadSchema>;
@@ -1637,10 +1668,51 @@ export class VaultMaintenance {
     };
   }
 
+  #assertVerifiedImportTokenUnclaimed(token: string): void {
+    const operations = this.#database.connection.prepare(`
+      SELECT phase, payload_json
+      FROM import_operations
+      WHERE phase IN ('prepared','database_complete','files_complete','complete')
+      ORDER BY rowid DESC
+    `).all() as Array<{ phase: ImportOperationRow["phase"]; payload_json: string }>;
+    for (const operation of operations) {
+      let raw: unknown;
+      try { raw = JSON.parse(operation.payload_json) as unknown; }
+      catch { continue; }
+      const rawRecovery = raw && typeof raw === "object" && !Array.isArray(raw)
+        ? (raw as { apiRecovery?: unknown }).apiRecovery
+        : undefined;
+      const journalToken = rawRecovery && typeof rawRecovery === "object" && !Array.isArray(rawRecovery)
+        ? (rawRecovery as { verificationToken?: unknown }).verificationToken
+        : undefined;
+      if (journalToken !== token) continue;
+      const parsed = ImportJournalPayloadSchema.safeParse(raw);
+      if (!parsed.success) {
+        throw new VaultVerificationTokenError("INVALID", "That verified import has an invalid durable consumption record.");
+      }
+      if (operation.phase === "prepared") {
+        throw new VaultVerificationTokenError("IN_USE", "That verified import is already owned by an import awaiting recovery.");
+      }
+      throw new VaultVerificationTokenError("CONSUMED", "That verified import was already consumed by a committed vault replacement.");
+    }
+  }
+
   #withVerifiedImportLifecycle<T>(operation: () => Promise<T>): Promise<T> {
     const task = this.#verifiedImportLifecycleQueue.then(operation);
     this.#verifiedImportLifecycleQueue = task.then(() => undefined, () => undefined);
     return task;
+  }
+
+  async #consumeVerifiedImportToken(token: string): Promise<void> {
+    const paths = this.#verifiedImportPaths(token);
+    await this.#withVerifiedImportLifecycle(async () => {
+      await mkdir(this.#verifiedImportDirectory(), { recursive: true, mode: 0o700 });
+      await chmod(this.#verifiedImportDirectory(), 0o700);
+      // Archive first, marker second: after any interruption the capability is
+      // unusable, and retrying either unlink plus the directory fsync is safe.
+      await unlinkDurablyIfExists(paths.archivePath, this.#syncDirectory);
+      await unlinkDurablyIfExists(paths.markerPath, this.#syncDirectory);
+    });
   }
 
   async pruneVerifiedImports(
@@ -1768,12 +1840,39 @@ export class VaultMaintenance {
     };
   }
 
-  async importVerifiedToken(tokenValue: string, mode: Exclude<ImportMode, "verify">): Promise<Record<string, unknown>> {
+  async importVerifiedToken(
+    tokenValue: string,
+    mode: Exclude<ImportMode, "verify">,
+    apiRecovery?: ImportApiRecovery
+  ): Promise<Record<string, unknown>> {
+    const requestedRecovery = apiRecovery
+      ? ImportApiRecoverySchema.parse(apiRecovery) as ImportApiRecovery
+      : undefined;
+    if (requestedRecovery) {
+      const prior = this.#database.idempotentResponse<Record<string, unknown>>(
+        requestedRecovery.idempotencyKey,
+        requestedRecovery.operation
+      );
+      if (prior) return prior;
+      const recovered = await this.#recoverApiImport(requestedRecovery);
+      if (recovered) return recovered;
+    }
     const paths = this.#verifiedImportPaths(tokenValue);
+    if (requestedRecovery?.verificationToken && requestedRecovery.verificationToken !== paths.token) {
+      throw new VaultVerificationTokenError("INVALID", "That verified import does not match the requested recovery identity.");
+    }
+    const normalizedRecovery = requestedRecovery
+      ? ImportApiRecoverySchema.parse({ ...requestedRecovery, verificationToken: paths.token }) as ImportApiRecovery
+      : undefined;
+    this.#assertVerifiedImportTokenUnclaimed(paths.token);
     if (this.#verifiedImportsInFlight.has(paths.token)) throw new VaultVerificationTokenError("IN_USE", "That verified import is already being committed.");
     this.#verifiedImportsInFlight.add(paths.token);
     let verified: VerifiedBundle | undefined;
     let consumeStagedImport = false;
+    let recoveryError: VaultImportRecoveryRequiredError | undefined;
+    let operationFailed = false;
+    let operationError: unknown;
+    let imported: Record<string, unknown> | undefined;
     try {
       let marker: VerifiedImportMarker;
       try {
@@ -1800,34 +1899,95 @@ export class VaultMaintenance {
         throw new VaultBundleValidationError(error);
       }
       if (verified.archiveChecksum !== marker.archiveChecksum) throw new VaultBundleValidationError(new Error("The staged archive changed after verification."));
-      const imported = await this.#importVerified(
+      imported = await this.#importVerified(
         verified,
         mode,
         marker.size,
-        (destination) => copyDurableFile(paths.archivePath, destination, marker.size, marker.archiveChecksum)
+        (destination) => copyDurableFile(paths.archivePath, destination, marker.size, marker.archiveChecksum),
+        normalizedRecovery
       );
       consumeStagedImport = true;
-      return imported;
     } catch (error) {
       // A verified archive is a retry handle. Consume it only after success or
       // when retrying cannot help; operational/storage failures keep it staged.
-      consumeStagedImport = error instanceof VaultBundleValidationError ||
+      // Once the replacement database commits, the journal's private archive
+      // is the sole recovery authority; retaining the verification duplicate
+      // would waste bounded staging capacity and invite a second import.
+      consumeStagedImport = error instanceof VaultImportRecoveryRequiredError ||
+        error instanceof VaultBundleValidationError ||
         (error instanceof VaultVerificationTokenError && ["INVALID", "NOT_FOUND", "EXPIRED"].includes(error.code));
-      throw error;
-    } finally {
-      try { await verified?.cleanup?.(); }
-      finally {
+      if (error instanceof VaultImportRecoveryRequiredError) recoveryError = error;
+      operationFailed = true;
+      operationError = error;
+    }
+
+    const cleanupErrors: unknown[] = [];
+    try { await verified?.cleanup?.(); }
+    catch (error) { cleanupErrors.push(error); }
+    try {
+      if (consumeStagedImport) {
+        await this.#consumeVerifiedImportToken(paths.token);
+      }
+    } catch (error) { cleanupErrors.push(error); }
+    this.#verifiedImportsInFlight.delete(paths.token);
+    if (cleanupErrors.length) {
+      const cleanupError = cleanupErrors.length === 1
+        ? cleanupErrors[0]
+        : new AggregateError(cleanupErrors, "Verified-import cleanup failed in more than one location.");
+      // A cleanup error in this outer verified-token layer must never mask a
+      // fail-closed database/post-database recovery signal: the route relies
+      // on that signal to retain both maintenance gates until restart.
+      if (recoveryError) {
+        throw new VaultImportRecoveryRequiredError(
+          new AggregateError([recoveryError.cause ?? recoveryError, cleanupError], "Vault import recovery and verified-token cleanup both failed."),
+          recoveryError.databaseCommitted
+        );
+      }
+      throw cleanupError;
+    }
+    if (operationFailed) throw operationError;
+    if (!imported) throw new Error("The verified import completed without a result.");
+    return imported;
+  }
+
+  async #recoverApiImport(apiRecovery: ImportApiRecovery): Promise<Record<string, unknown> | null> {
+    const maintenanceWasLocked = this.#database.getSetting("maintenance.locked", false);
+    this.#database.setSetting("maintenance.locked", true);
+    let recoveryRequired = false;
+    try {
+      const operations = this.#database.connection.prepare(`
+        SELECT * FROM import_operations
+        WHERE phase IN ('database_complete','files_complete','complete')
+        ORDER BY created_at DESC
+      `).all() as ImportOperationRow[];
+      for (const operation of operations) {
+        let parsedPayload: unknown;
+        try { parsedPayload = JSON.parse(operation.payload_json) as unknown; }
+        catch { continue; }
+        const parsed = ImportJournalPayloadSchema.safeParse(parsedPayload);
+        if (!parsed.success) continue;
+        const payload = parsed.data;
+        if (
+          payload.apiRecovery?.idempotencyKey !== apiRecovery.idempotencyKey ||
+          payload.apiRecovery?.operation !== apiRecovery.operation
+        ) continue;
         try {
-          if (consumeStagedImport) {
-            await this.#withVerifiedImportLifecycle(async () => {
-              await unlinkIfExists(paths.archivePath);
-              await unlinkIfExists(paths.markerPath);
-            });
-          }
-        } finally {
-          this.#verifiedImportsInFlight.delete(paths.token);
+          if (operation.phase !== "complete") await this.#finishImportOperation(operation.id);
+          const response = this.#database.idempotentResponse<Record<string, unknown>>(
+            apiRecovery.idempotencyKey,
+            apiRecovery.operation
+          );
+          if (!response) throw new Error("A completed import did not publish its durable API recovery response.");
+          return response;
+        } catch (error) {
+          recoveryRequired = true;
+          if (error instanceof VaultImportRecoveryRequiredError) throw error;
+          throw new VaultImportRecoveryRequiredError(error);
         }
       }
+      return null;
+    } finally {
+      if (!recoveryRequired) this.#database.setSetting("maintenance.locked", maintenanceWasLocked);
     }
   }
 
@@ -2525,13 +2685,13 @@ export class VaultMaintenance {
     }
   }
 
-  async importBundle(buffer: Buffer, mode: ImportMode): Promise<Record<string, unknown>> {
+  async importBundle(buffer: Buffer, mode: ImportMode, apiRecovery?: ImportApiRecovery): Promise<Record<string, unknown>> {
     const verified = await this.verifyBundle(buffer);
-    try { return await this.#importVerified(verified, mode, buffer.byteLength, (destination) => writeDurableFile(destination, buffer)); }
+    try { return await this.#importVerified(verified, mode, buffer.byteLength, (destination) => writeDurableFile(destination, buffer), apiRecovery); }
     finally { await verified.cleanup?.(); }
   }
 
-  async importBundleFile(archivePath: string, mode: ImportMode): Promise<Record<string, unknown>> {
+  async importBundleFile(archivePath: string, mode: ImportMode, apiRecovery?: ImportApiRecovery): Promise<Record<string, unknown>> {
     let verified: VerifiedBundle;
     try { verified = await this.verifyBundleFile(archivePath); }
     catch (error) {
@@ -2540,7 +2700,7 @@ export class VaultMaintenance {
     }
     try {
       const info = await stat(archivePath);
-      return await this.#importVerified(verified, mode, info.size, (destination) => copyDurableFile(archivePath, destination, info.size, verified.archiveChecksum));
+      return await this.#importVerified(verified, mode, info.size, (destination) => copyDurableFile(archivePath, destination, info.size, verified.archiveChecksum), apiRecovery);
     } finally {
       await verified.cleanup?.();
     }
@@ -2574,13 +2734,27 @@ export class VaultMaintenance {
     verified: VerifiedBundle,
     mode: ImportMode,
     archiveSize: number,
-    persistArchive: (destination: string) => Promise<void>
+    persistArchive: (destination: string) => Promise<void>,
+    apiRecovery?: ImportApiRecovery
   ): Promise<Record<string, unknown>> {
     if (mode === "verify") return { valid: true, manifest: verified.manifest };
     if (mode !== "replace" && mode !== "fresh") throw new Error("Unsupported import mode.");
+    const normalizedRecovery = apiRecovery
+      ? ImportApiRecoverySchema.parse(apiRecovery) as ImportApiRecovery
+      : undefined;
+    if (normalizedRecovery) {
+      const prior = this.#database.idempotentResponse<Record<string, unknown>>(
+        normalizedRecovery.idempotencyKey,
+        normalizedRecovery.operation
+      );
+      if (prior) return prior;
+      const recovered = await this.#recoverApiImport(normalizedRecovery);
+      if (recovered) return recovered;
+    }
 
     const maintenanceWasLocked = this.#database.getSetting("maintenance.locked", false);
     this.#database.setSetting("maintenance.locked", true);
+    let recoveryRequired = false;
     try {
       const activeWork = this.#database.connection.prepare(`
         SELECT
@@ -2601,10 +2775,16 @@ export class VaultMaintenance {
       await persistArchive(archivePath);
       const timestamp = new Date().toISOString();
       try {
+        const preparedPayload: ImportJournalPayload = {
+          oldHashes: [],
+          newlyCreatedHashes: [],
+          retainedHashes: [],
+          ...(normalizedRecovery ? { apiRecovery: normalizedRecovery } : {})
+        };
         this.#database.connection.prepare(`
           INSERT INTO import_operations(id, mode, archive_checksum, archive_filename, phase, payload_json, created_at, updated_at)
           VALUES (?, ?, ?, ?, 'prepared', ?, ?, ?)
-        `).run(operationId, mode, verified.archiveChecksum, archiveFilename, JSON.stringify({ oldHashes: [], newlyCreatedHashes: [], retainedHashes: [] }), timestamp, timestamp);
+        `).run(operationId, mode, verified.archiveChecksum, archiveFilename, JSON.stringify(preparedPayload), timestamp, timestamp);
       } catch (error) {
         await unlinkDurablyIfExists(archivePath, this.#syncDirectory);
         throw error;
@@ -2623,12 +2803,14 @@ export class VaultMaintenance {
       const journalPayload: ImportJournalPayload = {
         oldHashes,
         newlyCreatedHashes: [...newlyCreatedHashes],
-        retainedHashes: [...retainedHashes]
+        retainedHashes: [...retainedHashes],
+        ...(normalizedRecovery ? { apiRecovery: normalizedRecovery } : {})
       };
       this.#database.connection.prepare("UPDATE import_operations SET payload_json = ?, updated_at = ? WHERE id = ?").run(
         JSON.stringify(journalPayload), new Date().toISOString(), operationId
       );
       let databaseComplete = false;
+      let committedResponse: Record<string, unknown> | null = null;
       try {
         for (const hash of retainedHashes) {
           const bytes = await verifiedBytes(verified, `attachments/${hash}`);
@@ -2684,7 +2866,10 @@ export class VaultMaintenance {
             `).run(uuidv7(), type, key, JSON.stringify(payload), priority, availableAt, importedAt, importedAt);
           };
           const embeddingModel = this.#database.getSetting("models.embedding", this.#config.models.embedding);
-          const sourceHashes = new Map(portableRows(verified, "sources").map((source) => [String(source.id), String(source.content_hash)]));
+          const sourceHashes = new Map<string, string>();
+          for (const source of portableRows(verified, "sources")) {
+            sourceHashes.set(String(source.id), String(source.content_hash));
+          }
           for (const attachment of portableRows(verified, "attachments")) {
             const sourceId = String(attachment.source_id);
             const hasChunks = chunkSourceIds.has(sourceId);
@@ -2770,12 +2955,34 @@ export class VaultMaintenance {
             }
           }
           enqueue("memory.lint", stableHash(`import:${verified.archiveChecksum}:memory.lint`), { imported: true, mode }, 1);
-          this.#database.connection.prepare("UPDATE import_operations SET phase = 'database_complete', updated_at = ? WHERE id = ?").run(importedAt, operationId);
+          committedResponse = {
+            valid: true,
+            replaced: true,
+            mode,
+            manifest: verified.manifest,
+            attachmentsRestored: retainedHashes.size,
+            rebuildJobs: Number((this.#database.connection.prepare("SELECT COUNT(*) AS count FROM jobs").get() as { count: number }).count),
+            warnings: []
+          };
+          const databaseCompletePayload: ImportJournalPayload = {
+            ...journalPayload,
+            ...(normalizedRecovery ? {
+              apiRecovery: { ...normalizedRecovery, response: committedResponse }
+            } : {})
+          };
+          this.#database.connection.prepare(`
+            UPDATE import_operations
+            SET phase = 'database_complete', payload_json = ?, updated_at = ?
+            WHERE id = ?
+          `).run(JSON.stringify(databaseCompletePayload), importedAt, operationId);
         })();
         databaseComplete = true;
         await this.#finishImportOperation(operationId, verified);
       } catch (error) {
-        if (!databaseComplete) {
+        if (databaseComplete) {
+          recoveryRequired = true;
+          throw new VaultImportRecoveryRequiredError(error);
+        } else {
           try {
             for (const hash of newlyCreatedHashes) await store.delete(hash);
             await unlinkDurablyIfExists(archivePath, this.#syncDirectory);
@@ -2786,22 +2993,21 @@ export class VaultMaintenance {
             this.#database.connection.prepare("UPDATE import_operations SET last_error_code = 'ROLLBACK_CLEANUP_PENDING', updated_at = ? WHERE id = ?").run(
               new Date().toISOString(), operationId
             );
-            throw new Error("The failed import left cleanup work for startup recovery.", { cause: cleanupError });
+            // The logical replacement rolled back, but its staged CAS/archive
+            // mutations are now journal-owned. Do not admit a retry that could
+            // adopt one of those hashes before startup reconciles this prepared
+            // operation; otherwise the old journal could later delete a blob
+            // that the retry made authoritative.
+            recoveryRequired = true;
+            throw new VaultImportRecoveryRequiredError(cleanupError, false);
           }
         }
         throw error;
       }
-      return {
-        valid: true,
-        replaced: true,
-        mode,
-        manifest: verified.manifest,
-        attachmentsRestored: retainedHashes.size,
-        rebuildJobs: Number((this.#database.connection.prepare("SELECT COUNT(*) AS count FROM jobs").get() as { count: number }).count),
-        warnings: []
-      };
+      if (!committedResponse) throw new Error("The imported database committed without recording its exact success response.");
+      return committedResponse;
     } finally {
-      this.#database.setSetting("maintenance.locked", maintenanceWasLocked);
+      if (!recoveryRequired) this.#database.setSetting("maintenance.locked", maintenanceWasLocked);
     }
   }
 
@@ -2814,14 +3020,38 @@ export class VaultMaintenance {
     let abandoned = 0;
     try {
       const operations = this.#database.connection.prepare(`
-        SELECT * FROM import_operations WHERE phase IN ('prepared','database_complete','files_complete') ORDER BY created_at
-      `).all() as ImportOperationRow[];
+        SELECT rowid AS journal_rowid, *
+        FROM import_operations
+        WHERE phase IN ('prepared','database_complete','files_complete')
+        ORDER BY rowid
+      `).all() as OrderedImportOperationRow[];
       for (const operation of operations) {
         if (operation.phase === "prepared") {
           const payload = ImportJournalPayloadSchema.parse(JSON.parse(operation.payload_json) as unknown);
           const store = new FileSystemContentAddressedStore(this.#config.attachmentsDir);
           await store.initialize();
-          for (const hash of payload.newlyCreatedHashes) await store.delete(hash);
+          const liveHashes = new Set((this.#database.connection.prepare(`
+            SELECT DISTINCT content_hash FROM attachments
+          `).all() as Array<{ content_hash: string }>).map((row) => row.content_hash));
+          const laterCommittedHashes = new Set<string>();
+          const laterCommitted = this.#database.connection.prepare(`
+            SELECT payload_json
+            FROM import_operations
+            WHERE rowid > ? AND phase IN ('database_complete','files_complete','complete')
+            ORDER BY rowid
+          `).all(operation.journal_rowid) as Array<{ payload_json: string }>;
+          for (const later of laterCommitted) {
+            const laterPayload = ImportJournalPayloadSchema.parse(JSON.parse(later.payload_json) as unknown);
+            for (const hash of laterPayload.retainedHashes) laterCommittedHashes.add(hash);
+          }
+          for (const hash of payload.newlyCreatedHashes) {
+            // A previous binary could have unlocked after rollback cleanup
+            // failed and then admitted a successful retry. The live database
+            // and every later committed journal outrank the older prepared
+            // cleanup record, so neither may lose its authoritative CAS blob.
+            if (liveHashes.has(hash) || laterCommittedHashes.has(hash)) continue;
+            await store.delete(hash);
+          }
           await unlinkDurablyIfExists(this.#importArchivePath(operation.archive_filename), this.#syncDirectory);
           this.#database.connection.prepare(`
             UPDATE import_operations SET phase = 'failed', last_error_code = 'IMPORT_INTERRUPTED_BEFORE_COMMIT', updated_at = ? WHERE id = ?
@@ -2872,9 +3102,51 @@ export class VaultMaintenance {
       const retained = new Set(payload.retainedHashes);
       for (const hash of payload.oldHashes) if (!retained.has(hash)) await store.delete(hash);
       await unlinkDurablyIfExists(archivePath, this.#syncDirectory);
-      this.#database.connection.prepare(`
-        UPDATE import_operations SET phase = 'complete', payload_json = '{}', last_error_code = NULL, updated_at = ? WHERE id = ?
-      `).run(new Date().toISOString(), operationId);
+      if (payload.apiRecovery?.verificationToken) {
+        // The verification capability is part of the same terminal file fence
+        // as projections, CAS cleanup, and the journal archive. Its staged
+        // bytes/marker must be durably gone before API success is published.
+        await this.#consumeVerifiedImportToken(payload.apiRecovery.verificationToken);
+      }
+      const completedAt = new Date().toISOString();
+      const completedPayload: ImportJournalPayload = {
+        oldHashes: [],
+        newlyCreatedHashes: [],
+        // Retain only the hashes made authoritative by this import. Besides
+        // supporting audit, this lets recovery distinguish an older abandoned
+        // prepared cleanup from a later committed operation without retaining
+        // obsolete pre-import hashes or temporary-publication ownership.
+        retainedHashes: payload.retainedHashes,
+        ...(payload.apiRecovery ? {
+          apiRecovery: {
+            ...payload.apiRecovery,
+            ...(payload.apiRecovery.verificationToken ? { verificationTokenConsumedAt: completedAt } : {})
+          }
+        } : {})
+      };
+      this.#database.connection.transaction(() => {
+        if (payload.apiRecovery) {
+          if (!payload.apiRecovery.response) {
+            throw new Error("The import journal is missing its exact API success response.");
+          }
+          const responseJson = JSON.stringify(payload.apiRecovery.response);
+          this.#database.connection.prepare(`
+            INSERT OR IGNORE INTO idempotency_keys(key, operation, response_json, created_at)
+            VALUES (?, ?, ?, ?)
+          `).run(payload.apiRecovery.idempotencyKey, payload.apiRecovery.operation, responseJson, completedAt);
+          const published = this.#database.connection.prepare(`
+            SELECT response_json FROM idempotency_keys WHERE key = ? AND operation = ?
+          `).get(payload.apiRecovery.idempotencyKey, payload.apiRecovery.operation) as { response_json: string } | undefined;
+          if (published?.response_json !== responseJson) {
+            throw new Error("The import API idempotency key is already bound to a different response.");
+          }
+        }
+        this.#database.connection.prepare(`
+          UPDATE import_operations
+          SET phase = 'complete', payload_json = ?, last_error_code = NULL, updated_at = ?
+          WHERE id = ?
+        `).run(JSON.stringify(completedPayload), completedAt, operationId);
+      })();
     }
   }
 

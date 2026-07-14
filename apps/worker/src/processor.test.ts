@@ -69,6 +69,58 @@ function deterministicDelta(claims: EvidenceClaim[], affectedTopicHints: string[
   };
 }
 
+async function compiledInlinePair(
+  database: ContinuumDatabase,
+  config: AppConfig,
+  title: string,
+  expiredMarker: string,
+  survivingMarker: string
+): Promise<{ topicId: string; expired: EvidenceClaim; surviving: EvidenceClaim }> {
+  const expiredSource = database.appendEvent({ role: "user", content: expiredMarker });
+  const survivingSource = database.appendEvent({ role: "user", content: survivingMarker });
+  const expired = asEvidenceClaim(database, database.upsertClaim({
+    topicId: null,
+    subject: `${title} alpha`,
+    predicate: "records alpha",
+    value: expiredMarker,
+    confidence: 1,
+    status: "current",
+    sourceRole: "user",
+    sourceIds: [expiredSource.id],
+    validFrom: null,
+    validTo: null,
+    observedAt: "2026-07-14T10:00:00.000Z",
+    freshnessExpiresAt: null
+  }).id);
+  const surviving = asEvidenceClaim(database, database.upsertClaim({
+    topicId: null,
+    subject: `${title} beta`,
+    predicate: "records beta",
+    value: survivingMarker,
+    confidence: 1,
+    status: "current",
+    sourceRole: "user",
+    sourceIds: [survivingSource.id],
+    validFrom: null,
+    validTo: null,
+    observedAt: "2026-07-14T10:01:00.000Z",
+    freshnessExpiresAt: null
+  }).id);
+  const initial = await compileAffectedTopics(
+    database,
+    deterministicDelta([expired, surviving], [title]),
+    [expired, surviving],
+    config,
+    "2026-07-14T10:02:00.000Z",
+    [{ before: null, after: expired }, { before: null, after: surviving }]
+  );
+  if (initial.changedTopicIds.length !== 1) throw new Error(`Expected one inline topic for ${title}.`);
+  const topicId = initial.changedTopicIds[0]!;
+  const projection = database.connection.prepare("SELECT mode FROM topic_projection_state WHERE parent_topic_id = ?").get(topicId);
+  if (!projection || (projection as { mode: string }).mode !== "inline") throw new Error(`Expected an inline topic for ${title}.`);
+  return { topicId, expired, surviving };
+}
+
 async function compileInBatches(processor: JobProcessor, database: ContinuumDatabase, events: Array<{ id: string }>): Promise<void> {
   for (let offset = 0; offset < events.length; offset += 32) {
     await processor.process(compileJob(database, "", events.slice(offset, offset + 32).map((event) => event.id)));
@@ -89,6 +141,40 @@ describe("worker memory integration", () => {
     const queued = database.enqueueJob("projection.sync", stableHash("lease-projection-sync"), { topicIds: [] }, 8);
     const leased = database.leaseJob("projection-test-worker", 30_000, [...WORKER_JOB_TYPES]);
     expect(leased).toMatchObject({ id: queued.id, type: "projection.sync", status: "running" });
+  });
+
+  it("honors prompt-tracing revocation from an independent process before writing a late response", async () => {
+    const { database, config } = await fixture();
+    database.setSetting("promptTracing.enabled", true);
+    const apiDatabase = ContinuumDatabase.open(config);
+    const logger = new LocalLogger(config.logsDir, true);
+    logger.setPromptTracingResolver(() => database.getSetting("promptTracing.enabled", false));
+    const requestCanary = "request-content-visible-before-revocation";
+    const lateResponseCanary = "late-response-must-never-reach-disk";
+
+    try {
+      logger.debug("structured memory request", { prompt: requestCanary });
+      await logger.flush();
+
+      // Model a provider response queued by the worker just before the API
+      // process commits revocation. The queued write must observe the durable
+      // setting at its own write boundary, not consent cached at request time.
+      logger.debug("structured memory response", { toolOutput: lateResponseCanary });
+      apiDatabase.setSetting("promptTracing.enabled", false);
+      await logger.flush();
+
+      const entries = (await readdir(config.logsDir)).filter((entry) => entry.endsWith(".jsonl"));
+      const records = (await Promise.all(entries.map((entry) => readFile(join(config.logsDir, entry), "utf8"))))
+        .flatMap((contents) => contents.trim().split("\n").filter(Boolean))
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(records.find((record) => record.message === "structured memory request"))
+        .toMatchObject({ prompt: requestCanary });
+      expect(records.find((record) => record.message === "structured memory response"))
+        .toMatchObject({ toolOutput: "[REDACTED]" });
+      expect(JSON.stringify(records)).not.toContain(lateResponseCanary);
+    } finally {
+      apiDatabase.close();
+    }
   });
 
   it("publishes the latest committed projection and durably reconciles stale slugs and crashed temporaries", async () => {
@@ -414,7 +500,7 @@ describe("worker memory integration", () => {
     expect(database.getTopic(generated.id)).toBeNull();
     await expect(access(generatedPath)).rejects.toThrow();
     expect(database.getTopic(trusted.id)).toMatchObject({ id: trusted.id, userAuthored: true });
-    await expect(readFile(trustedPath, "utf8")).resolves.toBe(trusted.markdown);
+    await expect(readFile(trustedPath, "utf8")).resolves.toBe(database.getTopic(trusted.id)!.markdown);
   });
 
   it("uses the topic/revision index for latest and active revision reads", async () => {
@@ -1042,26 +1128,36 @@ describe("worker memory integration", () => {
 
     await processor.process(rebuild);
 
-    const membershipCounts = database.connection.prepare(`
-      SELECT shard.parent_topic_id, COUNT(DISTINCT shard.section_key) AS count FROM topic_section_shards shard
+    const membershipSections = database.connection.prepare(`
+      SELECT DISTINCT shard.parent_topic_id, shard.section_key FROM topic_section_shards shard
       JOIN topic_pages child ON child.id = shard.child_topic_id AND child.lifecycle_status = 'active'
       JOIN topic_page_revisions revision ON revision.topic_id = child.id AND revision.revision_number = child.active_revision
       JOIN page_section_sources pss ON pss.revision_id = revision.id AND pss.claim_id = ?
       WHERE shard.parent_topic_id IN (?, ?)
-      GROUP BY shard.parent_topic_id
-    `).all(moved.id, sourceParent.id, destinationParent.id) as Array<{ parent_topic_id: string; count: number }>;
-    expect(membershipCounts.find((row) => row.parent_topic_id === sourceParent.id)).toBeUndefined();
-    expect(membershipCounts.find((row) => row.parent_topic_id === destinationParent.id)?.count).toBe(2);
+      ORDER BY shard.parent_topic_id, shard.section_key
+    `).all(moved.id, sourceParent.id, destinationParent.id) as Array<{ parent_topic_id: string; section_key: string }>;
+    expect(membershipSections.find((row) => row.parent_topic_id === sourceParent.id)).toBeUndefined();
+    const destinationSections = new Set(membershipSections
+      .filter((row) => row.parent_topic_id === destinationParent.id)
+      .map((row) => row.section_key));
+    expect(destinationSections.has("current_state")).toBe(true);
+    expect(destinationSections.has("evidence")).toBe(true);
+    expect(destinationSections.has("history")).toBe(false);
     for (const membership of priorMemberships) {
       const link = database.connection.prepare("SELECT evidence_json FROM page_links WHERE source_topic_id = ? AND target_topic_id = ? AND relation_type = 'contains'").get(sourceParent.id, membership.child_topic_id) as { evidence_json: string } | undefined;
       if (link) expect(JSON.parse(link.evidence_json)).not.toContain(moved.id);
     }
     const destinationLinks = database.connection.prepare(`
-      SELECT link.evidence_json FROM page_links link
+      SELECT shard.section_key, link.evidence_json FROM page_links link
       JOIN topic_section_shards shard ON shard.child_topic_id = link.target_topic_id
       WHERE link.source_topic_id = ? AND link.relation_type = 'contains' AND shard.parent_topic_id = ?
-    `).all(destinationParent.id, destinationParent.id) as Array<{ evidence_json: string }>;
-    expect(destinationLinks.filter((link) => (JSON.parse(link.evidence_json) as string[]).includes(moved.id))).toHaveLength(2);
+    `).all(destinationParent.id, destinationParent.id) as Array<{ section_key: string; evidence_json: string }>;
+    const movedLinkSections = new Set(destinationLinks
+      .filter((link) => (JSON.parse(link.evidence_json) as string[]).includes(moved.id))
+      .map((link) => link.section_key));
+    expect(movedLinkSections.has("current_state")).toBe(true);
+    expect(movedLinkSections.has("evidence")).toBe(true);
+    expect(movedLinkSections.has("history")).toBe(false);
     expect(database.connection.prepare("SELECT COUNT(*) AS count FROM topic_projection_dirty WHERE claim_id = ?").get(moved.id)).toEqual({ count: 0 });
     expect(database.listJobs(500).some((job) => job.type === "projection.sync"
       && Array.isArray(job.payload.topicIds)
@@ -1213,6 +1309,266 @@ describe("worker memory integration", () => {
       const link = database.connection.prepare("SELECT evidence_json FROM page_links WHERE source_topic_id = ? AND target_topic_id = ? AND relation_type = 'contains'").get(unsupported.topic_id, membership.child_topic_id) as { evidence_json: string } | undefined;
       if (link) expect(JSON.parse(link.evidence_json)).not.toContain(unsupported.id);
     }
+  });
+
+  it("removes one expired claim from a surviving multi-claim inline projection", async () => {
+    const { database, processor, config } = await fixture();
+    const expiredSource = database.appendEvent({
+      role: "user",
+      content: "Remember this profile marker: inline-expired-marker must disappear after expiry."
+    });
+    const survivingSource = database.appendEvent({
+      role: "user",
+      content: "Remember this profile marker: inline-surviving-marker must remain after its neighbor expires."
+    });
+    const expiredStored = database.upsertClaim({
+      topicId: null,
+      subject: "User profile inline expiry alpha",
+      predicate: "records alpha",
+      value: "inline-expired-marker must disappear after expiry",
+      confidence: 1,
+      status: "current",
+      sourceRole: "user",
+      sourceIds: [expiredSource.id],
+      validFrom: null,
+      validTo: null,
+      observedAt: "2026-07-14T10:00:00.000Z",
+      freshnessExpiresAt: null
+    });
+    const survivingStored = database.upsertClaim({
+      topicId: null,
+      subject: "User profile inline expiry beta",
+      predicate: "records beta",
+      value: "inline-surviving-marker must remain after its neighbor expires",
+      confidence: 1,
+      status: "current",
+      sourceRole: "user",
+      sourceIds: [survivingSource.id],
+      validFrom: null,
+      validTo: null,
+      observedAt: "2026-07-14T10:01:00.000Z",
+      freshnessExpiresAt: null
+    });
+    const expiredBefore = asEvidenceClaim(database, expiredStored.id);
+    const surviving = asEvidenceClaim(database, survivingStored.id);
+    const initial = await compileAffectedTopics(
+      database,
+      deterministicDelta([expiredBefore, surviving], ["User profile"]),
+      [expiredBefore, surviving],
+      config,
+      "2026-07-14T10:02:00.000Z",
+      [{ before: null, after: expiredBefore }, { before: null, after: surviving }]
+    );
+    expect(initial.changedTopicIds).toHaveLength(1);
+    const topicId = initial.changedTopicIds[0]!;
+    expect(database.connection.prepare("SELECT mode FROM topic_projection_state WHERE parent_topic_id = ?").get(topicId))
+      .toEqual({ mode: "inline" });
+
+    const expiry = "2026-07-14T11:00:00.000Z";
+    database.connection.prepare("UPDATE claims SET freshness_expires_at = ? WHERE id = ?").run(expiry, expiredBefore.id);
+    const expiryJob = database.enqueueJobAt(
+      "memory.expire",
+      stableHash(`inline-partial-expire:${expiredBefore.id}:${expiry}`),
+      { claimId: expiredBefore.id, freshnessExpiresAt: expiry },
+      expiry,
+      8
+    );
+
+    const result = await processor.process(expiryJob);
+
+    expect(result).not.toHaveProperty("removedTopicId");
+    expect(database.connection.prepare("SELECT status FROM claims WHERE id = ?").get(expiredBefore.id))
+      .toEqual({ status: "expired" });
+    const topic = database.getTopic(topicId)!;
+    expect(topic.markdown).not.toContain("inline-expired-marker");
+    expect(topic.markdown).toContain("inline-surviving-marker");
+    const activeSources = database.connection.prepare(`
+      SELECT source.claim_id, COUNT(*) AS count
+      FROM topic_pages page
+      JOIN topic_page_revisions revision
+        ON revision.topic_id = page.id AND revision.revision_number = page.active_revision
+      JOIN page_section_sources source ON source.revision_id = revision.id
+      WHERE page.id = ? AND source.claim_id IN (?, ?)
+      GROUP BY source.claim_id
+    `).all(topicId, expiredBefore.id, surviving.id) as Array<{ claim_id: string; count: number }>;
+    expect(activeSources.find((row) => row.claim_id === expiredBefore.id)).toBeUndefined();
+    expect(activeSources.find((row) => row.claim_id === surviving.id)?.count).toBeGreaterThan(0);
+  });
+
+  it("targets an inline expiry rebuild by topic identity when a newer page has the same title", async () => {
+    const { database, processor, config } = await fixture();
+    const title = "Duplicate title expiry";
+    const expiredMarker = "duplicate-title-expired-marker";
+    const survivingMarker = "duplicate-title-surviving-marker";
+    const pair = await compiledInlinePair(database, config, title, expiredMarker, survivingMarker);
+    const duplicate = database.upsertTopicRevision({
+      type: "concept",
+      title,
+      slug: "duplicate-title-expiry-decoy",
+      markdown: "# Duplicate title expiry\n\nUnrelated newer page.",
+      summary: "Unrelated newer page.",
+      currentState: "",
+      history: "",
+      authorType: "model",
+      promptVersion: "duplicate-title-decoy-v1"
+    });
+    database.connection.prepare("UPDATE topic_pages SET updated_at = ? WHERE id = ?")
+      .run("2099-01-01T00:00:00.000Z", duplicate.id);
+    const expiry = "2026-07-14T11:00:00.000Z";
+    database.connection.prepare("UPDATE claims SET freshness_expires_at = ? WHERE id = ?").run(expiry, pair.expired.id);
+    const job = database.enqueueJobAt(
+      "memory.expire",
+      stableHash(`duplicate-title-inline-expiry:${pair.expired.id}:${expiry}`),
+      { claimId: pair.expired.id, freshnessExpiresAt: expiry },
+      expiry,
+      8
+    );
+
+    const result = await processor.process(job) as { rebuild: { rebuilt: string[] } };
+
+    expect(result.rebuild.rebuilt).toContain(pair.topicId);
+    expect(database.getTopic(pair.topicId)?.markdown).not.toContain(expiredMarker);
+    expect(database.getTopic(pair.topicId)?.markdown).toContain(survivingMarker);
+    expect(database.getTopic(duplicate.id)?.markdown).toBe("# Duplicate title expiry\n\nUnrelated newer page.");
+    expect(database.connection.prepare(`
+      SELECT COUNT(*) AS count FROM topic_pages page
+      JOIN topic_page_revisions revision
+        ON revision.topic_id = page.id AND revision.revision_number = page.active_revision
+      JOIN page_section_sources source ON source.revision_id = revision.id
+      WHERE page.id = ? AND source.claim_id = ?
+    `).get(pair.topicId, pair.expired.id)).toEqual({ count: 0 });
+  });
+
+  it("safety-scrubs a compiler-owned protected inline page without waiting for confirmation", async () => {
+    const { database, processor, config } = await fixture();
+    const title = "Protected inline expiry";
+    const expiredMarker = "protected-inline-expired-marker";
+    const survivingMarker = "protected-inline-surviving-marker";
+    const pair = await compiledInlinePair(database, config, title, expiredMarker, survivingMarker);
+    expect(database.setTopicUpdatePolicy(pair.topicId, "confirm")).toBe(true);
+    const before = database.getTopic(pair.topicId)!;
+    expect(before.userAuthored).toBe(false);
+    const projectionPath = join(config.projectionsDir, `${before.id}-${before.slug}.md`);
+    const firstExpiry = "2026-07-14T11:00:00.000Z";
+    database.connection.prepare("UPDATE claims SET freshness_expires_at = ? WHERE id = ?")
+      .run(firstExpiry, pair.expired.id);
+    const firstJob = database.enqueueJobAt(
+      "memory.expire",
+      stableHash(`protected-inline-partial-expiry:${pair.expired.id}:${firstExpiry}`),
+      { claimId: pair.expired.id, freshnessExpiresAt: firstExpiry },
+      firstExpiry,
+      8
+    );
+
+    const partial = await processor.process(firstJob) as { rebuild: { rebuilt: string[]; proposalIds: string[] } };
+
+    const scrubbed = database.getTopic(pair.topicId)!;
+    expect(partial.rebuild.rebuilt).toContain(pair.topicId);
+    expect(partial.rebuild.proposalIds).toEqual([]);
+    expect(scrubbed).toMatchObject({ userAuthored: false, updatePolicy: "confirm" });
+    expect(scrubbed.revision).toBeGreaterThan(before.revision);
+    expect(scrubbed.markdown).not.toContain(expiredMarker);
+    expect(scrubbed.markdown).toContain(survivingMarker);
+    await expect(readFile(projectionPath, "utf8")).resolves.not.toContain(expiredMarker);
+
+    const finalExpiry = "2026-07-14T12:00:00.000Z";
+    database.connection.prepare("UPDATE claims SET freshness_expires_at = ? WHERE id = ?")
+      .run(finalExpiry, pair.surviving.id);
+    const finalJob = database.enqueueJobAt(
+      "memory.expire",
+      stableHash(`protected-inline-final-expiry:${pair.surviving.id}:${finalExpiry}`),
+      { claimId: pair.surviving.id, freshnessExpiresAt: finalExpiry },
+      finalExpiry,
+      8
+    );
+
+    const removed = await processor.process(finalJob) as { removedTopicId: string };
+
+    expect(removed.removedTopicId).toBe(pair.topicId);
+    expect(database.getTopic(pair.topicId)).toBeNull();
+    await expect(access(projectionPath)).rejects.toThrow();
+  });
+
+  it("keeps related-page evidence limited to independently live claims across freshness expiry", async () => {
+    const { database, processor, config } = await fixture();
+    const title = "Related freshness target";
+    const relatedPage = database.upsertTopicRevision({
+      type: "concept",
+      title: "Related support page",
+      slug: "related-freshness-support-page",
+      markdown: "# Related support page\n\nUser-owned reference.",
+      summary: "User-owned reference.",
+      currentState: "",
+      history: "",
+      authorType: "user",
+      promptVersion: "related-support-user-v1"
+    });
+    const firstSource = database.appendEvent({ role: "user", content: "First independent related-page support." });
+    const secondSource = database.appendEvent({ role: "user", content: "Second independent related-page support." });
+    const elapsedSource = database.appendEvent({ role: "user", content: "Already elapsed related-page support." });
+    const supportClaim = (sourceId: string, predicate: string, observedAt: string, freshnessExpiresAt: string | null) =>
+      database.upsertClaim({
+        topicId: relatedPage.id,
+        subject: title,
+        predicate,
+        value: predicate,
+        confidence: 1,
+        status: "current",
+        sourceRole: "user",
+        sourceIds: [sourceId],
+        validFrom: null,
+        validTo: null,
+        observedAt,
+        freshnessExpiresAt
+      });
+    const first = supportClaim(firstSource.id, "has first live support", "2026-07-14T09:00:00.000Z", null);
+    const second = supportClaim(secondSource.id, "has second live support", "2026-07-14T09:01:00.000Z", null);
+    const elapsed = supportClaim(elapsedSource.id, "has elapsed support", "2026-07-14T09:02:00.000Z", "2020-01-01T00:00:00.000Z");
+    const pair = await compiledInlinePair(
+      database,
+      config,
+      title,
+      "related-target-expiring-local-marker",
+      "related-target-surviving-local-marker"
+    );
+    const link = () => database.connection.prepare(`
+      SELECT id, evidence_json AS evidenceJson FROM page_links
+      WHERE source_topic_id = ? AND target_topic_id = ? AND relation_type = 'related'
+    `).get(pair.topicId, relatedPage.id) as { id: string; evidenceJson: string } | undefined;
+    const initial = JSON.parse(link()!.evidenceJson) as string[];
+    expect(initial).toEqual(expect.arrayContaining([first.id, firstSource.id, second.id, secondSource.id]));
+    expect(initial).not.toEqual(expect.arrayContaining([elapsed.id, elapsedSource.id]));
+
+    const firstExpiry = "2026-07-14T11:00:00.000Z";
+    database.connection.prepare("UPDATE claims SET freshness_expires_at = ? WHERE id = ?").run(firstExpiry, first.id);
+    await processor.process(database.enqueueJobAt(
+      "memory.expire",
+      stableHash(`related-support-first-expiry:${first.id}:${firstExpiry}`),
+      { claimId: first.id, freshnessExpiresAt: firstExpiry },
+      firstExpiry,
+      8
+    ));
+
+    const afterFirst = JSON.parse(link()!.evidenceJson) as string[];
+    expect(afterFirst).not.toEqual(expect.arrayContaining([first.id, firstSource.id]));
+    expect(afterFirst).toEqual(expect.arrayContaining([second.id, secondSource.id]));
+    const currentGraphLink = database.graph(pair.topicId, 100, 1, false).edges
+      .find((edge) => edge.type === "related" && edge.target === relatedPage.id);
+    expect(currentGraphLink?.evidenceIds).toEqual(afterFirst);
+
+    const finalExpiry = "2026-07-14T12:00:00.000Z";
+    database.connection.prepare("UPDATE claims SET freshness_expires_at = ? WHERE id = ?").run(finalExpiry, second.id);
+    await processor.process(database.enqueueJobAt(
+      "memory.expire",
+      stableHash(`related-support-final-expiry:${second.id}:${finalExpiry}`),
+      { claimId: second.id, freshnessExpiresAt: finalExpiry },
+      finalExpiry,
+      8
+    ));
+
+    expect(link()).toBeUndefined();
+    expect(database.graph(pair.topicId, 100, 1, false).edges)
+      .not.toContainEqual(expect.objectContaining({ type: "related", target: relatedPage.id }));
   });
 
   it("removes a generated inline page when its final evidence disappears but preserves a trusted user page", async () => {
@@ -1696,9 +2052,12 @@ describe("worker memory integration", () => {
     const compiledParentId = links.find((link) => link.relation_type === "contains")!.source_topic_id;
     const compiledFamilyIds = [compiledParentId, ...children.map((child) => child.id)];
     const durableProjectionJobs = database.listJobs(500).filter((queued) => queued.type === "projection.sync");
-    expect(durableProjectionJobs.some((queued) => Array.isArray(queued.payload.topicIds)
-      && compiledFamilyIds.every((topicId) => queued.payload.topicIds.includes(topicId))
-      && queued.maximumAttempts >= 8)).toBe(true);
+    expect(durableProjectionJobs.some((queued) => {
+      const topicIds = queued.payload.topicIds;
+      return Array.isArray(topicIds)
+        && compiledFamilyIds.every((topicId) => topicIds.includes(topicId))
+        && queued.maximumAttempts >= 8;
+    })).toBe(true);
     const durableEmbeddingIds = new Set(database.listJobs(500)
       .filter((queued) => queued.type === "embedding.index" && queued.payload.sourceType === "topic")
       .map((queued) => String(queued.payload.sourceId)));
@@ -1737,9 +2096,12 @@ describe("worker memory integration", () => {
       expect(database.connection.prepare("SELECT COUNT(*) AS count FROM vectors WHERE source_id = ? AND source_type = 'topic'").get(child.id)).toEqual({ count: 0 });
     }
     const rebuildProjectionJobs = database.listJobs(500).filter((queued) => queued.type === "projection.sync" && !jobsBeforeRebuild.has(queued.id));
-    expect(rebuildProjectionJobs.some((queued) => Array.isArray(queued.payload.topicIds)
-      && children.every((child) => queued.payload.topicIds.includes(child.id))
-      && queued.maximumAttempts >= 8)).toBe(true);
+    expect(rebuildProjectionJobs.some((queued) => {
+      const topicIds = queued.payload.topicIds;
+      return Array.isArray(topicIds)
+        && children.every((child) => topicIds.includes(child.id))
+        && queued.maximumAttempts >= 8;
+    })).toBe(true);
     expect(database.connection.prepare(`
       SELECT COUNT(*) AS count FROM page_links pl
       LEFT JOIN topic_pages source ON source.id = pl.source_topic_id
@@ -1873,7 +2235,7 @@ describe("worker memory integration", () => {
     const firstProjection = join(config.projectionsDir, `${first.id}-${first.slug}.md`);
     const secondProjection = join(config.projectionsDir, `${second.id}-${second.slug}.md`);
     await writeFile(firstProjection, "stale canonical bytes");
-    await writeFile(secondProjection, second.markdown);
+    await writeFile(secondProjection, markdown);
 
     const job = database.enqueueJob("memory.lint", stableHash("lint:exact-repairs"), { manual: true });
     const result = await processor.process(job) as { repairs: Array<{ type: string }> };
@@ -1885,7 +2247,7 @@ describe("worker memory integration", () => {
     expect(database.connection.prepare("SELECT COUNT(DISTINCT source_id) AS count FROM page_section_sources pss JOIN topic_page_revisions tpr ON tpr.id = pss.revision_id JOIN topic_pages tp ON tp.id = tpr.topic_id AND tp.active_revision = tpr.revision_number WHERE tp.id = ?").get(first.id)).toEqual({ count: 2 });
     expect(database.connection.prepare("SELECT COUNT(*) AS count FROM claims WHERE topic_id = ?").get(first.id)).toEqual({ count: 1 });
     expect(database.getSetting<Array<unknown>>("memory.lintRepairAudit", [])).toHaveLength(1);
-    await expect(readFile(firstProjection, "utf8")).resolves.toBe(first.markdown);
+    await expect(readFile(firstProjection, "utf8")).resolves.toBe(markdown);
     await expect(access(secondProjection)).rejects.toThrow();
     expect(database.listJobs(500).some((queued) => queued.type === "projection.sync"
       && Array.isArray(queued.payload.topicIds)

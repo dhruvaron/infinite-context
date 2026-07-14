@@ -60,10 +60,10 @@ describe("production web-search persistence path", () => {
 
     const source = database.connection.prepare("SELECT * FROM sources WHERE type = 'web'").get() as Record<string, unknown>;
     expect(source.uri).toBe("https://example.com/current");
-    expect(source.freshness_class).toBe("news");
+    expect(source.freshness_class).toBe("rapid");
     expect(source.retrieved_at).toEqual(expect.any(String));
     const provenance = JSON.parse(String(source.provenance_json)) as Record<string, unknown>;
-    expect(provenance).toMatchObject({ providerStorage: false, freshnessClass: "news", excerptPolicy: expect.stringMatching(/not represented as verbatim page text/i) });
+    expect(provenance).toMatchObject({ providerStorage: false, freshnessClass: "rapid", excerptPolicy: expect.stringMatching(/not represented as verbatim page text/i) });
     expect(Date.parse(String(provenance.freshnessExpiresAt))).toBeGreaterThan(Date.parse(String(source.retrieved_at)));
 
     const chunk = database.connection.prepare("SELECT * FROM source_chunks WHERE source_id = ?").get(source.id) as Record<string, unknown>;
@@ -75,7 +75,7 @@ describe("production web-search persistence path", () => {
     const tool = database.connection.prepare("SELECT * FROM tool_executions WHERE run_id = ? AND tool_name = 'web_search'").get(run.id) as Record<string, unknown>;
     expect(tool.status).toBe("complete");
     const citations = JSON.parse(String(tool.citations_json)) as Array<Record<string, unknown>>;
-    expect(citations[0]).toMatchObject({ sourceId: source.id, chunkId: chunk.id, freshnessClass: "news", excerptKind: "provider_answer_citation_span" });
+    expect(citations[0]).toMatchObject({ sourceId: source.id, chunkId: chunk.id, freshnessClass: "rapid", excerptKind: "provider_answer_citation_span" });
     const toolEvents = database.connection.prepare("SELECT COUNT(*) AS count FROM events WHERE run_id = ? AND kind = 'tool_result'").get(run.id) as { count: number };
     expect(toolEvents.count).toBe(1);
   });
@@ -132,6 +132,8 @@ describe("production web-search persistence path", () => {
     const structuredStarted = new Promise<void>((resolve) => { markStructuredStarted = resolve; });
     const provider: ModelProvider = {
       name: "cancellable-retrieval-fixture",
+      // This fixture proves that cancellation prevents response streaming.
+      // eslint-disable-next-line require-yield
       async *streamResponse(): AsyncGenerator<ProviderStreamEvent> {
         throw new Error("response streaming must not start after retrieval cancellation");
       },

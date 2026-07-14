@@ -1006,5 +1006,39 @@ export const migrations: readonly Migration[] = [
       CREATE INDEX topic_projection_dirty_oldest_idx
         ON topic_projection_dirty(first_seen_at, parent_topic_id, claim_id, generation, repair_token);
     `
+  },
+  {
+    version: 18,
+    name: "preserve-exact-claim-slot-keys",
+    sql: `
+      -- Migration 14's UPDATE trigger rebuilt both keys with SQLite's
+      -- lower(trim()) even when only topic_id or status changed. That silently
+      -- downgraded application-normalized NFKC/inner-whitespace keys. Exact-key
+      -- ownership now stays in ContinuumDatabase.upsertClaim(): this trigger
+      -- only mirrors the metadata fields that production code also changes by
+      -- direct SQL. A missing companion row still receives a conservative SQL
+      -- baseline, and ContinuumDatabase.open() performs the version-3
+      -- JavaScript normalization pass immediately after this migration.
+      DROP TRIGGER claims_slot_index_au;
+      CREATE TRIGGER claims_slot_index_au AFTER UPDATE OF topic_id, status ON claims BEGIN
+        INSERT INTO claim_slot_index(claim_id, subject_key, predicate_key, topic_id, status, active_evidence)
+        VALUES (
+          new.id,
+          COALESCE((SELECT subject_key FROM claim_slot_index WHERE claim_id = new.id), lower(trim(new.subject))),
+          COALESCE((SELECT predicate_key FROM claim_slot_index WHERE claim_id = new.id), lower(trim(new.predicate))),
+          new.topic_id,
+          new.status,
+          COALESCE((SELECT active_evidence FROM claim_slot_index WHERE claim_id = new.id), 0)
+        )
+        ON CONFLICT(claim_id) DO UPDATE SET
+          topic_id = excluded.topic_id,
+          status = excluded.status;
+      END;
+
+      -- Version 3 means the keys were rebuilt after installing the safe UPDATE
+      -- trigger. Existing v14-v17 databases remain at version 2 and are
+      -- repaired from canonical claim text by application normalization.
+      UPDATE claim_slot_index_state SET normalization_version = 2 WHERE id = 1;
+    `
   }
 ];

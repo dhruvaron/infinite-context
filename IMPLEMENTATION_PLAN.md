@@ -398,13 +398,13 @@ Implement shared Zod contracts and generated TypeScript client types for these r
 - `/retrieval-traces`, `/context-packets`, `/model-calls`
 - `/export`, `/import`, `/backups`, `/vault`
 
-All mutations accept idempotency keys. All list APIs use cursor pagination. All destructive endpoints return a dry-run impact summary and require a confirmation token derived from that summary. Errors use a stable envelope containing code, user-safe message, retryability, trace ID, and field details. SSE events use versioned discriminated unions.
+All mutations accept idempotency keys. All list APIs use cursor pagination. All destructive endpoints return a dry-run impact summary and require a confirmation token derived from that summary. Errors use a stable envelope containing code, user-safe message, retryability, trace ID, and field details. SSE events use versioned discriminated unions. Core browser bootstrap reads form one verified snapshot: first-load failure is explicitly read-only/unavailable, while refresh failure preserves the prior complete view read-only instead of substituting empty collections. The settings dialog submits every changed setting in one validated, idempotent transaction so any rejected value rolls back the whole save.
 
 ## 12. Deletion, backups, export, and import
 
 ### Hard deletion
 
-Deletion permanently removes selected content and derived artifacts. If other sources independently support a claim, remove only the deleted provenance and keep the supported claim. After every cascade, rebuild affected pages and indexes transactionally and store a content-free deletion receipt.
+Deletion permanently removes selected content and derived artifacts. If other sources independently support a claim, remove only the deleted provenance and keep the supported claim. After every cascade, rebuild affected pages and indexes transactionally and store a content-free deletion receipt. Once deletion commits, the browser must invalidate streams and in-flight vault reads, scrub event, evidence, revision, retrieval, and provenance caches, and refetch the canonical snapshot without restoring the pre-deletion view on refresh failure.
 
 ### Backups
 
@@ -421,18 +421,20 @@ Export a versioned ZIP containing:
 - Original attachments and source metadata unless excluded.
 - Prompt/configuration version references without secrets.
 
-Do not export vector indexes or embeddings; rebuild them on import. Allow optional exclusion of attachments and sensitive tool output. Import verifies schema compatibility and checksums before mutation and supports creating a fresh vault or replacing the current one. Merging independent vaults is deferred.
+Do not export vector indexes or embeddings; rebuild them on import. Allow optional exclusion of attachments and sensitive tool output. Import verifies schema compatibility and checksums before mutation and supports creating a fresh vault or replacing the current one. Its API idempotency key and exact success response are part of the durable import journal, published only with terminal file/projection completion; a post-database failure keeps maintenance locked for startup recovery. A browser that loses the commit response scrubs the prior vault immediately and stays read-only rather than hydrating a possibly pre-import or mixed snapshot. Merging independent vaults is deferred.
 
 ## 13. Failure handling and observability
 
 - Commit the user event before remote generation so input is never lost.
 - Preserve unsent drafts and local search/memory access when OpenAI is unavailable.
 - Retrying generation creates a traceable run/revision, not duplicate events.
+- Persist each run's user-event parent independently of assistant-event creation. On reload, expose response retry only when the newest overall run is failed, has that parent, and has no active completed assistant answer, including failures before the first assistant delta.
 - Retry memory jobs with exponential backoff up to five attempts, then require visible manual retry.
 - Recover abandoned jobs and incomplete streams after restart.
 - Use transactional writes for claim/page/graph/index updates.
 - Show degraded status for missing vector support, failed OCR, provider errors, stale memory compilation, and budget limits.
 - Do not hide partial success: an answer can complete even when post-turn memory compilation fails.
+- Block acceptance of legacy unguarded proposals; rejection must atomically retire their candidates and queue normalized protected-parent recompilation.
 - Track local latency, token usage, cost, retrieval quality signals, and failure codes without remote telemetry.
 
 ## 14. Evaluation system

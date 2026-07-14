@@ -63,8 +63,8 @@ button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-
 .modal-open { overflow: hidden; }
 
 .app-shell { min-height: 100vh; background: radial-gradient(circle at 50% -20%, color-mix(in srgb, var(--surface-strong) 90%, transparent), transparent 38%), var(--bg); }
-.chat-shell { min-height: calc(100vh - 64px); display: grid; transition: margin-right .24s ease; }
-.chat-column { width: min(100%, 790px); margin: 0 auto; padding: 42px 24px 210px; position: relative; }
+.chat-shell { min-width: 0; min-height: calc(100vh - 64px); display: grid; grid-template-columns: minmax(0, 1fr); transition: margin-right .24s ease; }
+.chat-column { width: 100%; max-width: 790px; min-width: 0; margin: 0 auto; padding: 42px 24px 210px; position: relative; }
 .app-shell.drawer-memory-open .chat-shell { margin-right: 450px; }
 .app-shell.drawer-graph-open .chat-shell { margin-right: 610px; }
 .app-shell.drawer-memory-open .composer-wrap { margin-left: -225px; }
@@ -151,7 +151,7 @@ kbd { font-family: inherit; }
 .message { display: flex; line-height: 1.65; font-size: 15.5px; scroll-margin: 110px; border-radius: 16px; transition: background .3s ease, box-shadow .3s ease; content-visibility: auto; contain-intrinsic-size: auto 170px; }
 .message-highlight { background: color-mix(in srgb, var(--amber-pale) 65%, transparent); box-shadow: 0 0 0 9px color-mix(in srgb, var(--amber-pale) 65%, transparent); }
 .user-message { justify-content: flex-end; }
-.message-bubble { max-width: 84%; }
+.message-bubble { min-width: 0; max-width: 84%; overflow-wrap: anywhere; }
 .user-message .message-content { padding: 13px 17px; border-radius: 18px 18px 5px 18px; background: var(--surface-muted); }
 .message-content > p { margin: 0; white-space: pre-wrap; }
 .assistant-message { gap: 13px; }

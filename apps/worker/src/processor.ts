@@ -351,6 +351,22 @@ function evidenceClaims(database: ContinuumDatabase, claims: readonly Claim[]): 
   return claims.map((claim) => evidenceClaim(claim, kinds.get(claim.id) ?? "conversation"));
 }
 
+function heuristicPredicate(content: string): string {
+  if (/\bprefer/i.test(content)) return "prefers";
+  if (/\bdecided|\bwill\b/i.test(content)) return "decided";
+  if (/\bgoal|plan/i.test(content)) return "has goal";
+  const separator = content.lastIndexOf(":");
+  if (separator < 0) return "stated";
+  const label = content.slice(0, separator)
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/\b(?:actually|correction|corrected|remember|this|that|important|durable|please|save|record)\b/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+  return label ? `stated ${label.slice(-120)}` : "stated";
+}
+
 function heuristicDelta(request: StructuredGenerationRequest<unknown>): MemoryDelta {
   const input = request.input as { events?: ConversationEvent[]; extractionVersion?: string };
   const events = input.events ?? [];
@@ -379,14 +395,16 @@ function heuristicDelta(request: StructuredGenerationRequest<unknown>): MemoryDe
     // assistant conclusions; the user's source claim remains authoritative.
     const reusableAssistantConclusion = /\battributed conclusion\b/i.test(event.content);
     if (!durableSignal || explicitlyNonDurable || (event.role === "assistant" && !reusableAssistantConclusion)) continue;
-    const predicate = /\bprefer/i.test(event.content) ? "prefers" : /\bdecided|\bwill\b/i.test(event.content) ? "decided" : /\bgoal|plan/i.test(event.content) ? "has goal" : "stated";
+    const predicate = heuristicPredicate(event.content);
     const sourceKind = event.kind === "attachment" ? "attachment" as const : event.role === "tool" ? "tool" as const : "conversation" as const;
     claims.push({
       id: uuidv7(),
       topicId: null,
       subject: event.kind === "attachment" ? "Attached source" : event.role === "user" ? "User" : event.role === "assistant" ? "Assistant" : "Tool result",
       predicate,
-      value: event.content.trim().slice(0, 8_000),
+      // The claim ledger is canonical evidence and must remain exact. Wiki
+      // rendering applies its own explicit, provenance-preserving bounds.
+      value: event.content.trim(),
       confidence: durableSignal ? 0.9 : 0.62,
       status: "current",
       sourceRole: event.role,
@@ -917,12 +935,14 @@ function persistClaims(
     const bucketKey = `${effectiveIncoming.topicId ?? ""}\u0000${slot}`;
     let working = buckets.get(bucketKey);
     if (!working) {
-      working = database.listActiveClaimsForSlot(
-        effectiveIncoming.subject,
-        effectiveIncoming.predicate,
-        effectiveIncoming.topicId
+      working = evidenceClaims(
+        database,
+        database.listActiveClaimsForSlot(
+          effectiveIncoming.subject,
+          effectiveIncoming.predicate,
+          effectiveIncoming.topicId
+        )
       );
-      working = evidenceClaims(database, working);
       buckets.set(bucketKey, working);
       for (const claim of working) before.set(claim.id, claim);
     }
@@ -1211,38 +1231,6 @@ function enqueueDurableClaimEmbeddings(
   }
 }
 
-function persistTopicUpdateProposal(database: ContinuumDatabase, compiled: CompiledTopicPage, claims: readonly EvidenceClaim[], timestamp: string): { revisionId: string; revision: number } {
-  // Repeated delivery can only deduplicate the latest proposal. Looking for
-  // matching Markdown across immutable history made every update proportional
-  // to the number of prior revisions and incorrectly reused an old revision
-  // after a later edit. The topic/revision UNIQUE index makes this latest-row
-  // read O(1); compare the bounded Markdown in application code.
-  const latest = database.connection.prepare(`
-    SELECT id, revision_number, markdown, prompt_version FROM topic_page_revisions
-    WHERE topic_id = ? ORDER BY revision_number DESC LIMIT 1
-  `).get(compiled.page.id) as { id: string; revision_number: number; markdown: string; prompt_version: string } | undefined;
-  const duplicate = latest?.prompt_version === "topic-proposal-v1" && latest.markdown === compiled.markdown ? latest : undefined;
-  if (duplicate) {
-    refreshActiveTopicFts(database, compiled.page.id);
-    database.connection.prepare("DELETE FROM topic_revision_fts WHERE revision_id = ?").run(duplicate.id);
-    return { revisionId: duplicate.id, revision: duplicate.revision_number };
-  }
-  const revision = Number((database.connection.prepare("SELECT COALESCE(MAX(revision_number), 0) + 1 AS value FROM topic_page_revisions WHERE topic_id = ?").get(compiled.page.id) as { value: number }).value);
-  const revisionId = uuidv7();
-  database.connection.prepare(`
-    INSERT INTO topic_page_revisions(id, topic_id, revision_number, markdown, summary, current_state, history,
-      open_questions_json, generation_inputs_json, author_type, prompt_version, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'model', 'topic-proposal-v1', ?)
-  `).run(revisionId, compiled.page.id, revision, compiled.markdown, compiled.page.summary, compiled.page.currentState,
-    compiled.page.history, JSON.stringify(compiled.page.openQuestions), JSON.stringify({ activation: "proposal", claimIds: claims.map((claim) => claim.id), sourceIds: [...new Set(claims.flatMap((claim) => claim.sourceIds))] }), timestamp);
-  replaceRevisionProvenance({ database, revisionId, markdown: compiled.markdown, paragraphs: compiled.paragraphs, sectionSources: compiled.sectionSources, claims });
-  // Inserting an immutable historical proposal fires the legacy FTS trigger;
-  // immediately restore the trusted active revision as the current search row.
-  refreshActiveTopicFts(database, compiled.page.id);
-  database.connection.prepare("DELETE FROM topic_revision_fts WHERE revision_id = ?").run(revisionId);
-  return { revisionId, revision };
-}
-
 interface PersistedChildRevision {
   topicId: string;
   revisionId: string;
@@ -1411,9 +1399,85 @@ function replacePageLink(
   `).run(uuidv7(), sourceTopicId, targetTopicId, relationType, JSON.stringify([...new Set(evidenceIds)].sort()), timestamp);
 }
 
-function relatedPagesForClaims(database: ContinuumDatabase, topicId: string, claims: readonly EvidenceClaim[]) {
+function authoritativePageLinkEvidence(
+  database: ContinuumDatabase,
+  evidenceIds: readonly string[]
+): { evidenceIds: string[]; claimReferences: number; liveClaimReferences: number } {
+  const claimIds = new Set<string>();
+  const claimSourceIds = new Set<string>();
+  const authoritative = new Set<string>();
+  let liveClaimReferences = 0;
+  for (const id of evidenceIds) {
+    const anyEvidence = database.getClaim(id, true);
+    if (!anyEvidence) continue;
+    claimIds.add(id);
+    for (const sourceId of anyEvidence.sourceIds) claimSourceIds.add(sourceId);
+    const active = database.getClaim(id, false);
+    if (!active || (active.status !== "current" && active.status !== "conflicted")) continue;
+    liveClaimReferences += 1;
+    authoritative.add(active.id);
+    for (const sourceId of active.sourceIds) authoritative.add(sourceId);
+  }
+  // Evidence that was not derived from any referenced claim is independent
+  // support (for example a manually linked artifact) and must survive claim
+  // expiry. Claim-derived source IDs are rebuilt only from live claims above.
+  for (const id of evidenceIds) {
+    if (!claimIds.has(id) && !claimSourceIds.has(id)) authoritative.add(id);
+  }
+  return {
+    evidenceIds: [...authoritative].sort(),
+    claimReferences: claimIds.size,
+    liveClaimReferences
+  };
+}
+
+function scrubClaimFromMaterializedPageLinks(database: ContinuumDatabase, claimId: string): void {
+  const rows = database.connection.prepare(`
+    SELECT link.id, link.relation_type, link.evidence_json FROM page_links link
+    WHERE EXISTS (
+      SELECT 1 FROM json_each(
+        CASE WHEN json_valid(link.evidence_json) THEN link.evidence_json ELSE '[]' END
+      ) evidence WHERE evidence.value = ?
+    )
+  `).all(claimId) as Array<{ id: string; relation_type: string; evidence_json: string }>;
+  const update = database.connection.prepare("UPDATE page_links SET evidence_json = ? WHERE id = ?");
+  const remove = database.connection.prepare("DELETE FROM page_links WHERE id = ?");
+  for (const row of rows) {
+    let evidenceIds: string[];
+    try {
+      const parsed = JSON.parse(row.evidence_json) as unknown;
+      evidenceIds = Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : [];
+    } catch {
+      evidenceIds = [];
+    }
+    const authoritative = authoritativePageLinkEvidence(database, evidenceIds);
+    if (row.relation_type === "related"
+      && authoritative.claimReferences > 0
+      && authoritative.liveClaimReferences === 0
+      && authoritative.evidenceIds.length === 0) {
+      remove.run(row.id);
+    } else {
+      update.run(JSON.stringify(authoritative.evidenceIds), row.id);
+    }
+  }
+}
+
+function relatedPagesForClaims(database: ContinuumDatabase, topicId: string, topicTitle: string, claims: readonly EvidenceClaim[]) {
   const related = new Map<string, { id: string; title: string; evidenceIds: Set<string> }>();
-  for (const claim of claims) {
+  const exactSubjectClaims = (database.connection.prepare(`
+    SELECT id FROM claims
+    WHERE subject = ? AND topic_id IS NOT NULL AND topic_id <> ?
+      AND status IN ('current', 'conflicted')
+    ORDER BY observed_at DESC, id DESC LIMIT 20
+  `).all(topicTitle, topicId) as Array<{ id: string }>).flatMap(({ id }) => {
+    const claim = database.getClaim(id, false);
+    return claim && (claim.status === "current" || claim.status === "conflicted")
+      ? evidenceClaims(database, [claim])
+      : [];
+  });
+  const relatedEvidence = [...new Map([...claims, ...exactSubjectClaims].map((claim) => [claim.id, claim])).values()];
+  for (const claim of relatedEvidence) {
+    if (claim.status !== "current" && claim.status !== "conflicted") continue;
     if (!claim.topicId || claim.topicId === topicId) continue;
     const page = database.getTopic(claim.topicId);
     if (!page) continue;
@@ -1435,8 +1499,17 @@ function relatedPagesForClaims(database: ContinuumDatabase, topicId: string, cla
   `).all(topicId, topicId, topicId) as Array<{ source_topic_id: string; target_topic_id: string; evidence_json: string; title: string }>;
   for (const link of existingLinks) {
     const id = link.source_topic_id === topicId ? link.target_topic_id : link.source_topic_id;
+    let storedEvidence: string[] = [];
+    try {
+      const parsed = JSON.parse(link.evidence_json) as unknown;
+      if (Array.isArray(parsed)) storedEvidence = parsed.filter((value): value is string => typeof value === "string");
+    } catch { /* malformed evidence is retained for lint review */ }
+    const authoritative = authoritativePageLinkEvidence(database, storedEvidence);
+    if (authoritative.claimReferences > 0
+      && authoritative.liveClaimReferences === 0
+      && authoritative.evidenceIds.length === 0) continue;
     const entry = related.get(id) ?? { id, title: link.title, evidenceIds: new Set<string>() };
-    try { for (const value of JSON.parse(link.evidence_json) as string[]) entry.evidenceIds.add(value); } catch { /* malformed evidence is retained for lint review */ }
+    for (const value of authoritative.evidenceIds) entry.evidenceIds.add(value);
     related.set(id, entry);
   }
   return [...related.values()].sort((left, right) => left.id.localeCompare(right.id)).map((item) => ({ ...item, evidenceIds: [...item.evidenceIds].sort() }));
@@ -1594,6 +1667,7 @@ function projectionClaims(database: ContinuumDatabase, childTopicId: string, sec
     const claim = database.getClaim(id, false);
     if (!claim) return [];
     const value = evidenceClaims(database, [claim])[0]!;
+    if (value.status === "expired") return [];
     if (section === "current_state" && projectionSectionForClaim(value) !== "current_state") return [];
     if (section === "history" && projectionSectionForClaim(value) !== "history") return [];
     return [value];
@@ -2066,7 +2140,7 @@ async function updateShardedTopic(input: {
     for (const membership of memberships) {
       if (membership.section_key !== "overview") dirty.set(membership.child_topic_id, membership);
     }
-    const desired = change.after.topicId === input.parent.id
+    const desired = change.after.topicId === input.parent.id && change.after.status !== "expired"
       ? new Set<ProjectionSection>([projectionSectionForClaim(change.after), "evidence"])
       : new Set<ProjectionSection>();
     for (const section of desired) {
@@ -2281,7 +2355,7 @@ function proposeShardedTopicDelta(input: {
       }
       const canonical = evidenceClaims(input.database, [stored])[0]!;
       const explicitTopiclessAssignment = canonical.topicId === null
-        && change.before?.topicId === null
+        && (change.before === null || change.before.topicId === null)
         && change.after.topicId === parent.id;
       if (!explicitTopiclessAssignment && canonical.topicId !== change.after.topicId) {
         throw Object.assign(new Error(`Changed claim ${change.after.id} moved again before protected proposal planning.`), {
@@ -2582,7 +2656,7 @@ function proposeShardedTopicDelta(input: {
           isNewPage: !reuseBase,
           existingTopicId: reuseBase ? existingTopic!.id : null,
           revision,
-          baseRevision: reuseBase ? existingTopic!.activeRevision : null,
+          baseRevision: reuseBase ? (existingTopic!.activeRevision ?? existingTopic!.revision) : null,
           type: parent.type,
           tagsJson: JSON.stringify(["auto-split", `parent:${parent.id}`]),
           title: child.title,
@@ -2769,7 +2843,7 @@ function persistActiveCompilation(
         ? children.filter((_, index) => compiled.childPages[index]?.markdown.includes(encodedTarget)).map((child) => child.topicId)
         : [parent.topic.id];
       for (const sourceId of renderedSources) {
-        upsertPageLink(database, sourceId, related.id, "related", related.evidenceIds, timestamp);
+        replacePageLink(database, sourceId, related.id, "related", related.evidenceIds, timestamp);
       }
     }
     const assignTopic = database.connection.prepare("UPDATE claims SET topic_id = ? WHERE id = ?");
@@ -2800,61 +2874,6 @@ function persistActiveCompilation(
         ...children.filter((child) => child.changed).map((child) => child.topicId)
       ]
     };
-  })();
-}
-
-function persistTrustedCompilationProposal(
-  database: ContinuumDatabase,
-  compiled: CompiledTopicPage,
-  claims: readonly EvidenceClaim[],
-  relatedPages: ReturnType<typeof relatedPagesForClaims>,
-  timestamp: string
-): string {
-  return database.connection.transaction(() => {
-    const baseRevision = Number((database.connection.prepare("SELECT active_revision FROM topic_pages WHERE id = ?").get(compiled.page.id) as { active_revision: number }).active_revision);
-    const parent = persistTopicUpdateProposal(database, compiled, claims, timestamp);
-    const children = compiled.childPages.map((child) => persistChildRevision(database, compiled, child, claims, timestamp, false));
-    const groupId = stableHash(`topic-proposal-group:${compiled.page.id}:${stableHash(compiled.markdown)}:${children.map((child) => `${child.topicId}:${child.revisionId}`).join(":")}`);
-    appendPendingProposal(database, "memory.pendingTopicProposals", {
-      id: groupId,
-      groupId,
-      kind: children.length > 0 ? "topic_restructure" as const : "topic_update" as const,
-      topicId: compiled.page.id,
-      title: compiled.page.title,
-      baseRevision,
-      claimIds: claims.map((claim) => claim.id),
-      sourceIds: [...new Set(claims.flatMap((claim) => claim.sourceIds))],
-      parentRevisionId: parent.revisionId,
-      parentRevision: parent.revision,
-      children,
-      links: [
-        ...children.flatMap((child) => [
-          { sourceTopicId: compiled.page.id, targetTopicId: child.topicId, relationType: "contains", evidenceIds: child.evidenceIds },
-          { sourceTopicId: child.topicId, targetTopicId: compiled.page.id, relationType: "part_of", evidenceIds: child.evidenceIds }
-        ]),
-        ...children.slice(0, -1).flatMap((child, index) => {
-          const next = children[index + 1]!;
-          const evidenceIds = [...new Set([...child.evidenceIds, ...next.evidenceIds])];
-          return [
-            { sourceTopicId: child.topicId, targetTopicId: next.topicId, relationType: "next", evidenceIds },
-            { sourceTopicId: next.topicId, targetTopicId: child.topicId, relationType: "previous", evidenceIds }
-          ];
-        }),
-        ...relatedPages.flatMap((related) => {
-          const encodedTarget = `continuum://topic/${encodeURIComponent(related.id)}`;
-          const sources = compiled.childPages.length > 0
-            ? children.filter((_, index) => compiled.childPages[index]?.markdown.includes(encodedTarget)).map((child) => child.topicId)
-            : [compiled.page.id];
-          return sources.flatMap((sourceTopicId) => [
-            { sourceTopicId, targetTopicId: related.id, relationType: "related", evidenceIds: related.evidenceIds }
-          ]);
-        })
-      ],
-      requiresConfirmation: true as const,
-      status: "pending" as const,
-      createdAt: timestamp
-    });
-    return groupId;
   })();
 }
 
@@ -2955,7 +2974,12 @@ export async function compileAffectedTopics(
   claims: EvidenceClaim[],
   config: AppConfig,
   timestamp: string,
-  changes: ClaimStorageChange[] = []
+  changes: ClaimStorageChange[] = [],
+  options: {
+    forceFullRebuildTopicIds?: ReadonlySet<string>;
+    targetTopicIds?: ReadonlySet<string>;
+    protectedSafetyRebuildTopicIds?: ReadonlySet<string>;
+  } = {}
 ): Promise<TopicCompilationResult> {
   const normalizedTitle = (value: string) => value.normalize("NFKC").toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
   const hintedTitles = [...new Set(delta.affectedTopicHints)];
@@ -2968,6 +2992,7 @@ export async function compileAffectedTopics(
   // final claim topic depend on title order. Preserve genuinely distinct
   // entity pages while removing only titles contained by an explicit hint.
   const explicitParentIds = new Set<string>();
+  for (const topicId of options.targetTopicIds ?? []) explicitParentIds.add(topicId);
   for (const change of changes) {
     if (change.before?.topicId) explicitParentIds.add(change.before.topicId);
     if (change.after.topicId) explicitParentIds.add(change.after.topicId);
@@ -3052,19 +3077,25 @@ export async function compileAffectedTopics(
         if (proposalId) proposalIds.push(proposalId);
       }
     } else {
+      const dirtyGenerations = dirtyReplay.generations.get(parent.id);
       changedTopicIds.push(...await updateShardedTopic({
         database,
         config,
         parent,
         changes: effectiveChanges,
-        dirtyGenerations: dirtyReplay.generations.get(parent.id),
+        ...(dirtyGenerations ? { dirtyGenerations } : {}),
         timestamp
       }));
     }
     explicitlyPatched.add(parent.id);
   }
   for (const title of titles) {
-    const existing = findTopicByTitle(database, title);
+    const titleKey = normalizedTitle(title);
+    const targetedExisting = [...(options.targetTopicIds ?? [])].flatMap((topicId) => {
+      const topic = database.getTopic(topicId);
+      return topic && normalizedTitle(topic.title) === titleKey ? [topic] : [];
+    })[0];
+    const existing = targetedExisting ?? findTopicByTitle(database, title);
     const titleTokens = title.toLocaleLowerCase().split(/\s+/).filter((token) => token.length > 2);
     const titleMatches = (claim: EvidenceClaim) => titleTokens.some((token) => `${claim.subject} ${claim.predicate} ${claim.value}`.toLocaleLowerCase().includes(token));
     let candidates = compilationClaims.filter((claim) => {
@@ -3075,7 +3106,7 @@ export async function compileAffectedTopics(
       candidates = compilationClaims.filter((claim) => claim.topicId === null || claim.topicId === existing?.id);
     }
     if (candidates.length === 0) continue;
-    const projection = existing
+    const projection = existing && !options.forceFullRebuildTopicIds?.has(existing.id)
       ? database.connection.prepare("SELECT mode FROM topic_projection_state WHERE parent_topic_id = ?").get(existing.id) as { mode: "inline" | "sharded" } | undefined
       : undefined;
     if (existing && projection?.mode === "sharded") {
@@ -3142,11 +3173,19 @@ export async function compileAffectedTopics(
     // this compilation path.
     const relatedById = new Map<string, EvidenceClaim>();
     if (existing) {
-      for (const claim of evidenceClaims(database, listAllClaimsForTopic(database, existing.id))) relatedById.set(claim.id, claim);
+      for (const claim of evidenceClaims(database, listAllClaimsForTopic(database, existing.id))) {
+        // Expiration removes a claim from the active projection while retaining
+        // its canonical ledger row for exact historical lookup. A forced inline
+        // rebuild must not rehydrate that expired row into History or Evidence.
+        if (claim.status !== "expired") relatedById.set(claim.id, claim);
+      }
     }
-    for (const claim of candidates) relatedById.set(claim.id, claim);
+    for (const claim of candidates) {
+      if (claim.status !== "expired") relatedById.set(claim.id, claim);
+    }
     const related = [...relatedById.values()];
-    if (existing?.updatePolicy === "confirm") {
+    const protectedSafetyRebuild = Boolean(existing && options.protectedSafetyRebuildTopicIds?.has(existing.id));
+    if (existing?.updatePolicy === "confirm" && !protectedSafetyRebuild) {
       // One-time inline -> sharded conversion uses the same normalized,
       // exactly-guarded proposal path as every later protected update. The
       // active user revision remains untouched until accept; topicless claims
@@ -3175,7 +3214,7 @@ export async function compileAffectedTopics(
       ...evidence.map((claim) => paragraph("evidence", `${claimLine(claim)} — sources: ${claim.sourceIds.join(", ")}`, [claim]))
     ];
     const id = existing?.id ?? uuidv7();
-    const relatedPages = relatedPagesForClaims(database, id, related);
+    const relatedPages = relatedPagesForClaims(database, id, title, related);
     const compiled = compileTopicPage({
       id,
       type: existing?.type ?? delta.entities.find((entity) => title.toLocaleLowerCase().includes(entity.displayName.toLocaleLowerCase()))?.type ?? "concept",
@@ -3795,6 +3834,7 @@ export class JobProcessor {
   }
 
   async #rebuildTopics(requestedTopicIds: readonly string[]): Promise<Record<string, unknown>> {
+    const requestedProjectionIds = [...new Set(requestedTopicIds.filter(Boolean))].sort();
     const topicIds = new Set<string>();
     for (const requestedId of requestedTopicIds) {
       if (!this.#database.connection.prepare("SELECT 1 FROM topic_pages WHERE id = ?").get(requestedId)) continue;
@@ -3809,13 +3849,13 @@ export class JobProcessor {
       const topic = this.#database.getTopic(topicId);
       if (!topic) continue;
       const beforeArtifacts = projectionArtifactsForRoot(this.#database, topicId);
+      const projection = this.#database.connection.prepare(`
+        SELECT mode FROM topic_projection_state WHERE parent_topic_id = ?
+      `).get(topicId) as { mode: "inline" | "sharded" } | undefined;
       const claims = evidenceClaims(this.#database, listAllClaimsForTopic(this.#database, topicId))
         .filter((claim) => claim.sourceIds.length > 0 && claim.status !== "expired");
       if (claims.length === 0) {
-        if (topic.userAuthored || topic.updatePolicy === "confirm") {
-          const projection = this.#database.connection.prepare(`
-            SELECT mode FROM topic_projection_state WHERE parent_topic_id = ?
-          `).get(topicId) as { mode: "inline" | "sharded" } | undefined;
+        if (topic.userAuthored || (topic.updatePolicy === "confirm" && projection?.mode === "sharded")) {
           const hasDirtyClaims = Boolean(this.#database.connection.prepare(`
             SELECT 1 FROM topic_projection_dirty WHERE parent_topic_id = ? LIMIT 1
           `).get(topicId));
@@ -3838,7 +3878,15 @@ export class JobProcessor {
                 warnings: []
               }
             };
-            const compilation = await compileAffectedTopics(this.#database, emptyDelta, [], this.#config, timestamp);
+            const compilation = await compileAffectedTopics(
+              this.#database,
+              emptyDelta,
+              [],
+              this.#config,
+              timestamp,
+              [],
+              { targetTopicIds: new Set([topicId]) }
+            );
             rebuilt.push(...compilation.changedTopicIds);
             proposalIds.push(...compilation.proposalIds);
             const afterArtifacts = projectionArtifactsForRoot(this.#database, topicId);
@@ -3894,7 +3942,22 @@ export class JobProcessor {
         affectedTopicHints: [topic.title],
         trace: { promptVersion: "deletion-rebuild-v1", schemaVersion: MEMORY_EXTRACTION_SCHEMA_VERSION, providerModel: "deterministic-rebuild", inputEventIds: [...new Set(claims.flatMap((claim) => claim.sourceIds))], warnings: [] }
       };
-      const compilation = await compileAffectedTopics(this.#database, delta, claims, this.#config, timestamp);
+      const compilation = await compileAffectedTopics(
+        this.#database,
+        delta,
+        claims,
+        this.#config,
+        timestamp,
+        [],
+        {
+          targetTopicIds: new Set([topicId]),
+          ...(topic.updatePolicy === "automatic"
+            ? { forceFullRebuildTopicIds: new Set([topicId]) }
+            : topic.updatePolicy === "confirm" && !topic.userAuthored && projection?.mode !== "sharded"
+              ? { protectedSafetyRebuildTopicIds: new Set([topicId]) }
+              : {})
+        }
+      );
       rebuilt.push(...compilation.changedTopicIds);
       proposalIds.push(...compilation.proposalIds);
       const afterArtifacts = projectionArtifactsForRoot(this.#database, topicId);
@@ -3903,6 +3966,13 @@ export class JobProcessor {
         ...beforeArtifacts.map((artifact) => artifact.id),
         ...afterArtifacts.map((artifact) => artifact.id)
       ])]);
+    }
+    if (requestedProjectionIds.length > 0) {
+      enqueueDurableProjectionSync(
+        this.#database,
+        requestedProjectionIds,
+        `memory_rebuild_request:${stableHash(requestedProjectionIds.join(":"))}`
+      );
     }
     return { rebuilt: [...new Set(rebuilt)], proposalIds: [...new Set(proposalIds)], removed, preserved };
   }
@@ -3938,6 +4008,7 @@ export class JobProcessor {
       if (!alreadyExpired) {
         this.#database.connection.prepare("UPDATE claims SET status = 'expired', valid_to = COALESCE(valid_to, ?) WHERE id = ?").run(expectedExpiry, claimId);
       }
+      scrubClaimFromMaterializedPageLinks(this.#database, claimId);
       // The vector eligibility change is part of the same commit as status and
       // dirty-parent state. An in-flight old job also rechecks authority before
       // publish, so it cannot resurrect this expired claim afterward.
@@ -3954,7 +4025,21 @@ export class JobProcessor {
     const projection = this.#database.connection.prepare("SELECT mode FROM topic_projection_state WHERE parent_topic_id = ?").get(topic.id) as { mode: "inline" | "sharded" } | undefined;
     if (projection?.mode !== "sharded" && after.status === "expired") {
       const rebuild = await this.#rebuildTopics([topic.id]);
-      return { expired: true, alreadyExpired, claimId, topicIds: [], rebuild };
+      const removedTopicId = Array.isArray(rebuild.removed) && rebuild.removed.includes(topic.id)
+        ? topic.id
+        : null;
+      const preservedUserAuthored = topic.userAuthored
+        && Array.isArray(rebuild.preserved)
+        && rebuild.preserved.includes(topic.id);
+      return {
+        expired: true,
+        alreadyExpired,
+        claimId,
+        topicIds: [],
+        ...(removedTopicId ? { removedTopicId } : {}),
+        ...(preservedUserAuthored ? { preservedUserAuthored: true } : {}),
+        rebuild
+      };
     }
     if (!activeExpired) {
       // Evidence can be deactivated between the ledger transition and the

@@ -7,7 +7,7 @@ import { loadConfig, stableHash, type AppConfig } from "@continuum/config";
 import { ContinuumDatabase, uuidv7 } from "@continuum/database";
 import { FileSystemContentAddressedStore } from "@continuum/ingestion";
 import { buildApp } from "./app.js";
-import { VaultMaintenance } from "./maintenance.js";
+import { VaultImportRecoveryRequiredError, VaultMaintenance } from "./maintenance.js";
 import { LocalToolRuntime } from "./tool-runtime.js";
 
 type Fixture = {
@@ -31,6 +31,7 @@ async function fixture(label: string): Promise<Fixture> {
   const database = ContinuumDatabase.open(config);
   const store = new FileSystemContentAddressedStore(config.attachmentsDir);
   await store.initialize();
+  await mkdir(config.exportsDir, { recursive: true, mode: 0o700 });
   const value = { root, config, database, maintenance: new VaultMaintenance(database, config), store, closed: false };
   fixtures.push(value);
   return value;
@@ -150,6 +151,8 @@ describe("VaultMaintenance portable bundles", () => {
       { started: () => undefined, completed: () => undefined }
     );
     expect(output).toContain(secret);
+    value.database.connection.prepare("UPDATE runs SET status = 'complete', completed_at = ? WHERE id = ?")
+      .run(new Date().toISOString(), run.id);
     const toolEvent = value.database.connection.prepare("SELECT id FROM events WHERE role = 'tool' AND kind = 'tool_result' ORDER BY sequence DESC LIMIT 1").get() as { id: string };
     const topic = value.database.upsertTopicRevision({
       type: "concept", title: secret, slug: "tool-secret", markdown: `# ${secret}\n`, summary: secret,
@@ -270,15 +273,29 @@ describe("VaultMaintenance portable bundles", () => {
     const connection = target.database.connection as unknown as { backup: (path: string) => Promise<unknown> };
     const originalBackup = connection.backup.bind(connection);
     connection.backup = async () => { throw Object.assign(new Error("disk full"), { code: "ENOSPC" }); };
-    await expect(target.maintenance.importVerifiedToken(staged.verificationToken, "replace")).rejects.toMatchObject({ code: "ENOSPC" });
+    const apiRecovery = { idempotencyKey: "verified-import-retry-key", operation: "vault.import.commit" as const };
+    await expect(target.maintenance.importVerifiedToken(staged.verificationToken, "replace", apiRecovery)).rejects.toMatchObject({ code: "ENOSPC" });
     expect((await readdir(join(target.config.dataDir, "verified-imports"))).sort()).toEqual([
       `${staged.verificationToken}.json`,
       `${staged.verificationToken}.zip`
     ]);
 
     connection.backup = originalBackup;
-    await expect(target.maintenance.importVerifiedToken(staged.verificationToken, "replace")).resolves.toMatchObject({ valid: true, replaced: true });
+    await expect(target.maintenance.importVerifiedToken(staged.verificationToken, "replace", apiRecovery)).resolves.toMatchObject({ valid: true, replaced: true });
     expect(await readdir(join(target.config.dataDir, "verified-imports"))).toEqual([]);
+    const terminalPayload = JSON.parse(String((target.database.connection.prepare(`
+      SELECT payload_json FROM import_operations WHERE phase = 'complete'
+    `).get() as { payload_json: string }).payload_json)) as { apiRecovery?: Record<string, unknown> };
+    expect(terminalPayload.apiRecovery).toMatchObject({
+      ...apiRecovery,
+      verificationToken: staged.verificationToken,
+      verificationTokenConsumedAt: expect.any(String),
+      response: { valid: true, replaced: true }
+    });
+    await expect(target.maintenance.importVerifiedToken(staged.verificationToken, "replace", {
+      idempotencyKey: "verified-import-new-key",
+      operation: "vault.import.commit"
+    })).rejects.toMatchObject({ code: "CONSUMED" });
   });
 
   it("excludes inactive assistant revisions from fresh-import memory compilation batches", async () => {
@@ -318,7 +335,7 @@ describe("VaultMaintenance portable bundles", () => {
       topicId: topic.id,
       subject: "User certification",
       predicate: "is valid",
-      value: true,
+      value: "valid",
       confidence: 1,
       status: "current",
       sourceRole: "user",
@@ -486,6 +503,36 @@ describe("VaultMaintenance portable bundles", () => {
         && /^[a-f0-9]{64}$/.test(generation);
     })).toBe(true);
     expect(jobs.some((job) => job.type === "malicious.imported" || job.type === "old.job")).toBe(false);
+  });
+
+  it("imports file-backed version-2 source iterators when scheduling chunk embeddings", async () => {
+    const source = await fixture("streamed-source-iterator-source");
+    const sourceContentHash = stableHash("streamed source generation");
+    const sourceId = source.database.createSource({
+      type: "web",
+      title: "Streamed source iterator",
+      uri: "https://example.test/streamed-source",
+      contentHash: sourceContentHash,
+      provenance: { parser: "iterator-regression" }
+    });
+    source.database.addSourceChunks(sourceId, [{ text: "A file-backed v2 row iterator must remain importable." }]);
+    const bundle = await exportBytes(source, false);
+
+    const target = await fixture("streamed-source-iterator-target");
+    await expect(target.maintenance.importBundle(bundle, "replace")).resolves.toMatchObject({
+      valid: true,
+      replaced: true,
+      mode: "replace"
+    });
+    const embeddingJob = target.database.listJobs(100).find((job) =>
+      job.type === "embedding.index" && job.payload.sourceId === sourceId
+    );
+    expect(embeddingJob?.payload).toMatchObject({
+      sourceId,
+      sourceType: "chunk",
+      sourceGenerationHash: sourceContentHash,
+      model: target.config.models.embedding
+    });
   });
 
   it("rejects checksum-valid but structurally unexpected archive members", async () => {
@@ -686,8 +733,7 @@ describe("VaultMaintenance portable bundles", () => {
         new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("buildApp blocked on backup catch-up")), 1_000))
       ]);
       await built.app.listen({ host: "127.0.0.1", port: 0 });
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(due).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(due).toHaveBeenCalledTimes(1));
       const running = await built.app.inject({
         method: "GET", url: "/api/v1/health",
         headers: { authorization: `Bearer ${value.config.sessionToken}`, host: "127.0.0.1" }
@@ -865,11 +911,29 @@ describe("VaultMaintenance portable bundles", () => {
     await mkdir(restrictedParent, { mode: 0o500 });
     const recoveryConfig = { ...target.config, projectionsDir: join(restrictedParent, "wiki") } as AppConfig;
     const interrupted = new VaultMaintenance(target.database, recoveryConfig);
+    const importIdempotencyKey = "startup-import-recovery-key";
+    const stagedArchivePath = join(target.root, "startup-import-token.zip");
+    await writeFile(stagedArchivePath, bundle, { mode: 0o600 });
+    const staged = await target.maintenance.stageVerifiedImportFile(stagedArchivePath) as { verificationToken: string };
 
-    await expect(interrupted.importBundle(bundle, "replace")).rejects.toThrow();
+    await expect(interrupted.importBundle(bundle, "replace", {
+      idempotencyKey: importIdempotencyKey,
+      operation: "vault.import.commit",
+      verificationToken: staged.verificationToken
+    })).rejects.toThrow();
     expect(target.database.listEvents({ limit: 20 }).map((item) => item.content)).toEqual(["journal import event"]);
     expect(target.database.connection.prepare("SELECT phase FROM import_operations").get()).toEqual({ phase: "database_complete" });
+    expect(target.database.idempotentResponse(importIdempotencyKey, "vault.import.commit")).toBeNull();
+    const interruptedPayload = JSON.parse(String((target.database.connection.prepare(
+      "SELECT payload_json FROM import_operations"
+    ).get() as { payload_json: string }).payload_json)) as { apiRecovery?: { response?: Record<string, unknown> } };
+    const exactResponse = interruptedPayload.apiRecovery?.response;
+    expect(exactResponse).toMatchObject({ valid: true, replaced: true, mode: "replace", attachmentsRestored: 1 });
     await expect(target.store.has(old.hash)).resolves.toBe(true);
+    expect((await readdir(join(target.config.dataDir, "verified-imports"))).sort()).toEqual([
+      `${staged.verificationToken}.json`,
+      `${staged.verificationToken}.zip`
+    ]);
 
     target.database.close();
     target.closed = true;
@@ -883,6 +947,38 @@ describe("VaultMaintenance portable bundles", () => {
     const { app, services } = await buildApp({ config: recoveryConfig });
     try {
       expect(services.database.connection.prepare("SELECT phase FROM import_operations").get()).toEqual({ phase: "complete" });
+      expect(services.database.idempotentResponse(importIdempotencyKey, "vault.import.commit")).toEqual(exactResponse);
+      const replay = await app.inject({
+        method: "POST",
+        url: "/api/v1/import/commit",
+        headers: {
+          authorization: `Bearer ${recoveryConfig.sessionToken}`,
+          host: "127.0.0.1",
+          "x-continuum-request": "1",
+          "content-type": "application/json"
+        },
+        payload: { verificationToken: uuidv7(), mode: "fresh", idempotencyKey: importIdempotencyKey }
+      });
+      expect(replay.statusCode, replay.body).toBe(200);
+      expect(replay.json()).toEqual(exactResponse);
+      expect(await readdir(join(target.config.dataDir, "verified-imports"))).toEqual([]);
+      const reusedWithNewKey = await app.inject({
+        method: "POST",
+        url: "/api/v1/import/commit",
+        headers: {
+          authorization: `Bearer ${recoveryConfig.sessionToken}`,
+          host: "127.0.0.1",
+          "x-continuum-request": "1",
+          "content-type": "application/json"
+        },
+        payload: {
+          verificationToken: staged.verificationToken,
+          mode: "replace",
+          idempotencyKey: "startup-import-token-new-key"
+        }
+      });
+      expect(reusedWithNewKey.statusCode, reusedWithNewKey.body).toBe(410);
+      expect(reusedWithNewKey.json()).toMatchObject({ error: { code: "VERIFIED_IMPORT_CONSUMED", retryable: false } });
       await expect(readFile(join(recoveryConfig.projectionsDir, `${topic.id}-journal-topic.md`), "utf8")).resolves.toContain("Recovered projection");
       await expect(target.store.has(old.hash)).resolves.toBe(false);
       await expect(target.store.has(attachment.hash)).resolves.toBe(true);
@@ -941,16 +1037,42 @@ describe("VaultMaintenance portable bundles", () => {
         }
       }
     });
+    const importIdempotencyKey = "database-complete-import-key";
 
-    await expect(interrupted.importBundle(bundle, "replace")).rejects.toThrow(/projection swap sync failure/i);
+    await expect(interrupted.importBundle(bundle, "replace", {
+      idempotencyKey: importIdempotencyKey,
+      operation: "vault.import.commit"
+    })).rejects.toMatchObject({
+      name: "VaultImportRecoveryRequiredError",
+      cause: { message: expect.stringMatching(/projection swap sync failure/i) }
+    });
     expect(parentSyncs).toBe(3);
     expect(syncedDirectories.some((path) => basename(path).includes(".import-"))).toBe(true);
     expect(target.database.connection.prepare("SELECT phase FROM import_operations").get()).toEqual({ phase: "database_complete" });
+    expect(target.database.idempotentResponse(importIdempotencyKey, "vault.import.commit")).toBeNull();
+    const databaseCompletePayload = JSON.parse(String((target.database.connection.prepare(
+      "SELECT payload_json FROM import_operations"
+    ).get() as { payload_json: string }).payload_json)) as { apiRecovery?: { response?: Record<string, unknown> } };
+    const exactResponse = databaseCompletePayload.apiRecovery?.response;
+    expect(exactResponse).toMatchObject({ valid: true, replaced: true, mode: "replace" });
     expect((await readdir(projectionParent)).some((entry) => entry.includes(".previous-"))).toBe(true);
 
     const recovered = new VaultMaintenance(target.database, target.config);
     await expect(recovered.resumeIncompleteImports()).resolves.toEqual({ resumed: 1, abandoned: 0 });
     expect(target.database.connection.prepare("SELECT phase FROM import_operations").get()).toEqual({ phase: "complete" });
+    expect(target.database.idempotentResponse(importIdempotencyKey, "vault.import.commit")).toEqual(exactResponse);
+    const terminalPayload = JSON.parse(String((target.database.connection.prepare(
+      "SELECT payload_json FROM import_operations"
+    ).get() as { payload_json: string }).payload_json)) as Record<string, unknown>;
+    expect(terminalPayload).toMatchObject({
+      oldHashes: [], newlyCreatedHashes: [], retainedHashes: [],
+      apiRecovery: { idempotencyKey: importIdempotencyKey, operation: "vault.import.commit", response: exactResponse }
+    });
+    await expect(recovered.importBundle(bundle, "fresh", {
+      idempotencyKey: importIdempotencyKey,
+      operation: "vault.import.commit"
+    })).resolves.toEqual(exactResponse);
+    expect(target.database.connection.prepare("SELECT COUNT(*) AS count FROM import_operations").get()).toEqual({ count: 1 });
     await expect(readFile(join(target.config.projectionsDir, `${importedTopic.id}-${importedTopic.slug}.md`), "utf8"))
       .resolves.toContain("Imported projection canary");
     await expect(readFile(oldProjectionPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
@@ -985,16 +1107,190 @@ describe("VaultMaintenance portable bundles", () => {
         }
       }
     });
+    const importIdempotencyKey = "files-complete-import-key";
 
-    await expect(interrupted.importBundle(bundle, "replace")).rejects.toThrow(/archive deletion sync failure/i);
+    await expect(interrupted.importBundle(bundle, "replace", {
+      idempotencyKey: importIdempotencyKey,
+      operation: "vault.import.commit"
+    })).rejects.toMatchObject({
+      name: "VaultImportRecoveryRequiredError",
+      cause: { message: expect.stringMatching(/archive deletion sync failure/i) }
+    });
     expect(injected).toBe(true);
     expect(target.database.connection.prepare("SELECT phase FROM import_operations").get()).toEqual({ phase: "files_complete" });
+    expect(target.database.idempotentResponse(importIdempotencyKey, "vault.import.commit")).toBeNull();
+    const filesCompletePayload = JSON.parse(String((target.database.connection.prepare(
+      "SELECT payload_json FROM import_operations"
+    ).get() as { payload_json: string }).payload_json)) as { apiRecovery?: { response?: Record<string, unknown> } };
+    const exactResponse = filesCompletePayload.apiRecovery?.response;
+    expect(exactResponse).toMatchObject({ valid: true, replaced: true, mode: "replace" });
     expect(await readdir(journalDirectory)).toEqual([]);
 
     const recovered = new VaultMaintenance(target.database, target.config);
     await expect(recovered.resumeIncompleteImports()).resolves.toEqual({ resumed: 1, abandoned: 0 });
     expect(target.database.connection.prepare("SELECT phase FROM import_operations").get()).toEqual({ phase: "complete" });
+    expect(target.database.idempotentResponse(importIdempotencyKey, "vault.import.commit")).toEqual(exactResponse);
     expect(await readdir(journalDirectory)).toEqual([]);
+  });
+
+  it("keeps failed rollback cleanup locked and never lets its prepared journal delete a retry's authoritative CAS blob", async () => {
+    const source = await fixture("rollback-cleanup-source");
+    const attachmentBytes = Buffer.from("authoritative bytes shared with the successful retry");
+    const importedAttachment = await addAttachment(source, attachmentBytes);
+    source.database.appendEvent({
+      role: "user",
+      content: "The rollback-cleanup retry must retain this attachment.",
+      attachmentIds: [importedAttachment.attachmentId]
+    });
+    const bundle = await exportBytes(source);
+
+    const target = await fixture("rollback-cleanup-target");
+    const journalDirectory = resolve(join(target.config.dataDir, "import-journal"));
+    let failRollbackArchiveSync = false;
+    const interrupted = new VaultMaintenance(target.database, target.config, {
+      syncDirectory: async (path) => {
+        if (failRollbackArchiveSync && resolve(path) === journalDirectory) {
+          failRollbackArchiveSync = false;
+          throw Object.assign(new Error("injected rollback cleanup sync failure"), { code: "EIO" });
+        }
+      }
+    });
+    const transactionFailure = vi.spyOn(target.database, "rebuildClaimSlotIndex").mockImplementationOnce(() => {
+      failRollbackArchiveSync = true;
+      throw new Error("injected import database transaction failure");
+    });
+
+    try {
+      await expect(interrupted.importBundle(bundle, "replace", {
+        idempotencyKey: "rollback-cleanup-interrupted-key",
+        operation: "vault.import.commit"
+      })).rejects.toMatchObject({
+        name: "VaultImportRecoveryRequiredError",
+        databaseCommitted: false,
+        cause: { message: expect.stringMatching(/rollback cleanup sync failure/i) }
+      });
+    } finally {
+      transactionFailure.mockRestore();
+    }
+    expect(failRollbackArchiveSync).toBe(false);
+    expect(target.database.getSetting("maintenance.locked", false)).toBe(true);
+    expect(target.database.connection.prepare(`
+      SELECT phase, last_error_code AS lastErrorCode FROM import_operations ORDER BY rowid
+    `).all()).toEqual([{ phase: "prepared", lastErrorCode: "ROLLBACK_CLEANUP_PENDING" }]);
+    await expect(target.store.has(importedAttachment.hash)).resolves.toBe(false);
+
+    // Model the persisted state an older binary could leave after incorrectly
+    // unlocking this cleanup, then complete the exact retry. Startup must honor
+    // the live database and later committed journal over the abandoned record.
+    target.database.setSetting("maintenance.locked", false);
+    const retryResponse = await new VaultMaintenance(target.database, target.config).importBundle(bundle, "replace", {
+      idempotencyKey: "rollback-cleanup-successful-retry-key",
+      operation: "vault.import.commit"
+    });
+    expect(retryResponse).toMatchObject({ valid: true, replaced: true, mode: "replace", attachmentsRestored: 1 });
+    await expect(target.store.has(importedAttachment.hash)).resolves.toBe(true);
+    expect(target.database.connection.prepare(`
+      SELECT phase FROM import_operations ORDER BY rowid
+    `).all()).toEqual([{ phase: "prepared" }, { phase: "complete" }]);
+    const retryJournal = target.database.connection.prepare(`
+      SELECT payload_json AS payloadJson FROM import_operations WHERE phase = 'complete'
+    `).get() as { payloadJson: string };
+    expect(JSON.parse(retryJournal.payloadJson)).toMatchObject({ retainedHashes: [importedAttachment.hash] });
+
+    target.database.close();
+    target.closed = true;
+    const { app, services } = await buildApp({ config: target.config });
+    try {
+      expect(services.database.getSetting("maintenance.locked", true)).toBe(false);
+      expect(services.database.connection.prepare(`
+        SELECT phase, last_error_code AS lastErrorCode FROM import_operations ORDER BY rowid
+      `).all()).toEqual([
+        { phase: "failed", lastErrorCode: "IMPORT_INTERRUPTED_BEFORE_COMMIT" },
+        { phase: "complete", lastErrorCode: null }
+      ]);
+      expect(services.database.connection.prepare(`
+        SELECT COUNT(*) AS count FROM attachments WHERE content_hash = ?
+      `).get(importedAttachment.hash)).toEqual({ count: 1 });
+      const recoveredStore = new FileSystemContentAddressedStore(target.config.attachmentsDir);
+      await recoveredStore.initialize();
+      await expect(recoveredStore.get(importedAttachment.hash)).resolves.toEqual(attachmentBytes);
+      expect(services.database.idempotentResponse(
+        "rollback-cleanup-successful-retry-key",
+        "vault.import.commit"
+      )).toEqual(retryResponse);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("purges and syncs prior prompt traces before an import can reach its database commit", async () => {
+    const value = await fixture("import-trace-precommit-fence");
+    value.database.setSetting("promptTracing.enabled", true);
+    const built = await buildApp({ config: value.config, database: value.database });
+    const oldTracePath = join(value.config.logsDir, "prior-vault-trace.jsonl");
+    await writeFile(oldTracePath, "old-vault-private-prompt-canary\n", { mode: 0o600 });
+    const importAttempt = vi.spyOn(built.services.maintenance, "importVerifiedToken").mockImplementation(async () => {
+      await expect(readFile(oldTracePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+      throw new Error("injected failure before the import database transaction");
+    });
+    const auth = { authorization: `Bearer ${value.config.sessionToken}`, host: "127.0.0.1", "x-continuum-request": "1" };
+    try {
+      const failed = await built.app.inject({
+        method: "POST",
+        url: "/api/v1/import/commit",
+        headers: auth,
+        payload: { verificationToken: uuidv7(), mode: "replace", idempotencyKey: "trace-precommit-import-key" }
+      });
+      expect(failed.statusCode).toBe(500);
+      expect(built.services.logger.promptTracingEnabled).toBe(true);
+      expect(value.database.getSetting("maintenance.locked", true)).toBe(false);
+      expect(importAttempt).toHaveBeenCalledOnce();
+    } finally {
+      importAttempt.mockRestore();
+      await built.app.close();
+      value.closed = true;
+    }
+  });
+
+  it("returns an explicit recovery error and keeps all mutations locked after a post-database import failure", async () => {
+    const value = await fixture("import-postcommit-failure-lock");
+    value.database.setSetting("promptTracing.enabled", true);
+    const built = await buildApp({ config: value.config, database: value.database });
+    const oldTracePath = join(value.config.logsDir, "prior-vault-trace.jsonl");
+    await writeFile(oldTracePath, "postcommit-old-vault-private-prompt-canary\n", { mode: 0o600 });
+    const importAttempt = vi.spyOn(built.services.maintenance, "importVerifiedToken").mockRejectedValueOnce(
+      new VaultImportRecoveryRequiredError(Object.assign(new Error("injected projection finalization failure"), { code: "EIO" }))
+    );
+    const auth = { authorization: `Bearer ${value.config.sessionToken}`, host: "127.0.0.1", "x-continuum-request": "1" };
+    try {
+      const failed = await built.app.inject({
+        method: "POST",
+        url: "/api/v1/import/commit",
+        headers: auth,
+        payload: { verificationToken: uuidv7(), mode: "replace", idempotencyKey: "postcommit-import-recovery-key" }
+      });
+      expect(failed.statusCode, failed.body).toBe(503);
+      expect(failed.json()).toMatchObject({ error: { code: "VAULT_IMPORT_RECOVERY_REQUIRED", retryable: true } });
+      expect(value.database.getSetting("maintenance.locked", false)).toBe(true);
+      expect(built.services.logger.promptTracingEnabled).toBe(false);
+      await built.services.logger.flush();
+      const logContents = await Promise.all((await readdir(value.config.logsDir))
+        .filter((entry) => entry.endsWith(".jsonl"))
+        .map((entry) => readFile(join(value.config.logsDir, entry), "utf8")));
+      expect(logContents.join("\n")).not.toContain("postcommit-old-vault-private-prompt-canary");
+      const replayWhileLocked = await built.app.inject({
+        method: "POST",
+        url: "/api/v1/import/commit",
+        headers: auth,
+        payload: { verificationToken: uuidv7(), mode: "replace", idempotencyKey: "postcommit-import-recovery-key" }
+      });
+      expect(replayWhileLocked.statusCode, replayWhileLocked.body).toBe(423);
+      expect(replayWhileLocked.json()).toMatchObject({ error: { code: "MAINTENANCE_LOCKED" } });
+    } finally {
+      importAttempt.mockRestore();
+      await built.app.close();
+      value.closed = true;
+    }
   });
 
   it("resumes hard-deletion file and backup cleanup at startup", async () => {

@@ -8,6 +8,7 @@ import { enqueueIdleLintIfDue } from "./scheduler.js";
 const config = loadConfig();
 const database = ContinuumDatabase.open(config);
 const logger = new LocalLogger(config.logsDir, database.getSetting("promptTracing.enabled", false));
+logger.setPromptTracingResolver(() => database.getSetting("promptTracing.enabled", false));
 const providers = new ProviderFactory(config);
 const processor = new JobProcessor(database, config, providers, logger);
 const workerId = `worker-${uuidv7()}`;
@@ -27,7 +28,6 @@ function checkIdleLint(): boolean {
 
 async function tick(): Promise<void> {
   if (stopping) return;
-  logger.setPromptTracing(database.getSetting("promptTracing.enabled", false));
   if (database.getSetting("maintenance.locked", false)) {
     timer = setTimeout(() => void tick(), 300);
     return;

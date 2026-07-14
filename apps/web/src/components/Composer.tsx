@@ -74,12 +74,12 @@ export function Composer({ draft, attachments, progress, memoryPaused, webSearch
         {running
           ? progress.stage === "connection_lost"
             ? null
-            : <button className="stop-button" type="button" disabled={progress.stage === "cancelling" || progress.stage === "saving"} onClick={onStop} aria-label={progress.stage === "cancelling" ? "Stopping response" : progress.stage === "saving" ? "Message is being saved" : "Stop response"}><Square size={13} fill="currentColor" /></button>
+            : <button className="stop-button" type="button" disabled={disabled || progress.stage === "cancelling" || progress.stage === "saving"} onClick={onStop} aria-label={progress.stage === "cancelling" ? "Stopping response" : progress.stage === "saving" ? "Message is being saved" : "Stop response"}><Square size={13} fill="currentColor" /></button>
           : <button className="send-button" type="submit" aria-label="Send message" disabled={disabled || (!draft.trim() && !attachments.length)}><ArrowUp size={18} /></button>}
       </div>
       {running && progress.stage !== "connection_lost" && <div className="run-progress" role="status"><span className="run-shimmer" /><span>{progress.label}</span></div>}
-      {progress.stage === "connection_lost" && <div className="run-progress run-failed" role="status"><AlertTriangle size={14} /><span>{progress.label}</span><button type="button" className="text-button" onClick={onResumeResponse}><RotateCcw size={13} /> Resume response</button><button type="button" className="text-button" onClick={onStop}>Stop response</button></div>}
-      {progress.stage === "failed" && <div className="run-progress run-failed" role="status"><AlertTriangle size={14} /><span>{progress.label}</span>{retryAvailable && <button type="button" className="text-button" onClick={onRetryResponse}><RotateCcw size={13} /> Retry response</button>}</div>}
+      {progress.stage === "connection_lost" && <div className="run-progress run-failed" role="status"><AlertTriangle size={14} /><span>{progress.label}</span><button type="button" className="text-button" disabled={disabled} onClick={onResumeResponse}><RotateCcw size={13} /> Resume response</button><button type="button" className="text-button" disabled={disabled} onClick={onStop}>Stop response</button></div>}
+      {progress.stage === "failed" && <div className="run-progress run-failed" role="status"><AlertTriangle size={14} /><span>{progress.label}</span>{retryAvailable && <button type="button" className="text-button" disabled={disabled} onClick={onRetryResponse}><RotateCcw size={13} /> Retry response</button>}</div>}
     </form>
     <p className="composer-note" role={disabled ? "status" : undefined}>{disabled ? "Drafts stay in this browser while the local service is unavailable. Reconnect to send." : "History is stored locally. Only selected context and your current request are sent to the configured model."}</p>
   </div>;

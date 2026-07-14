@@ -6,7 +6,9 @@ import {
   PUBLIC_API_CONTRACTS,
   PUBLIC_API_RESOURCE_GROUPS,
   RunStreamWireEventSchema,
+  SettingBatchMutationRequestSchema,
   TopicIdentitySchema,
+  VaultSnapshotBoundarySchema,
   type PublicApiRequestBody,
   type PublicApiResponse
 } from "./api.js";
@@ -19,12 +21,32 @@ const compileTimeMessageRequest = {
 } satisfies PublicApiRequestBody<"messages.create">;
 
 const compileTimeCancelResponse = { cancelled: true } satisfies PublicApiResponse<"runs.cancel">;
+const compileTimeSettingsBatch = {
+  mutations: [{ key: "theme", value: "dark" }],
+  idempotencyKey: "settings-batch-1"
+} satisfies PublicApiRequestBody<"settings.batch.put">;
 
 describe("public API contract inventory", () => {
   it("generates request and response client types from the same route inventory", () => {
     expect(compileTimeMessageRequest.quality).toBe("balanced");
     expect(compileTimeCancelResponse.cancelled).toBe(true);
+    expect(compileTimeSettingsBatch.mutations).toHaveLength(1);
   });
+
+  it("bounds settings batches and rejects duplicate submitted keys", () => {
+    expect(SettingBatchMutationRequestSchema.safeParse({ mutations: [], idempotencyKey: "empty-settings-batch" }).success).toBe(false);
+    const oversized = SettingBatchMutationRequestSchema.safeParse({
+      mutations: Array.from({ length: 33 }, (_, index) => ({ key: "system.instructions", value: String(index) })),
+      idempotencyKey: "oversized-settings-batch"
+    });
+    expect(oversized.success).toBe(false);
+    if (!oversized.success) expect(oversized.error.issues).toEqual(expect.arrayContaining([expect.objectContaining({ code: "too_big" })]));
+    expect(SettingBatchMutationRequestSchema.safeParse({
+      mutations: [{ key: "theme", value: "dark" }, { key: "theme", value: "light" }],
+      idempotencyKey: "duplicate-settings-batch"
+    }).success).toBe(false);
+  });
+
   it("covers every section-11 resource group with unique route identities", () => {
     const ids = PUBLIC_API_CONTRACTS.map((contract) => contract.id);
     const routes = PUBLIC_API_CONTRACTS.map((contract) => `${contract.method} ${contract.path}`);
@@ -40,6 +62,13 @@ describe("public API contract inventory", () => {
     expect(ApiErrorSchema.parse({ error: { code: "NOT_FOUND", message: "Not found.", retryable: false, traceId: "trace-1", details: { field: "id" } } }))
       .toEqual({ error: { code: "NOT_FOUND", message: "Not found.", retryable: false, traceId: "trace-1", details: { field: "id" } } });
     expect(ApiErrorSchema.safeParse({ message: "raw database failure" }).success).toBe(false);
+  });
+
+  it("defines a strict server-issued vault snapshot boundary", () => {
+    const boundary = { generation: 42, maintenanceLocked: false, vaultId: "00000000-0000-4000-8000-000000000000" };
+    expect(VaultSnapshotBoundarySchema.parse(boundary)).toEqual(boundary);
+    expect(VaultSnapshotBoundarySchema.safeParse({ ...boundary, generation: -1 }).success).toBe(false);
+    expect(VaultSnapshotBoundarySchema.safeParse({ ...boundary, extra: true }).success).toBe(false);
   });
 
   it("requires a version on every SSE data frame", () => {

@@ -93,30 +93,59 @@ describe("ContinuumApi security headers", () => {
     expect(requestSignal?.aborted).toBe(true);
   });
 
+  it("aborts every in-flight SSE response when the vault scope is reset", async () => {
+    let streamSignal: AbortSignal | undefined;
+    vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) => new Promise<Response>((_resolve, reject) => {
+      streamSignal = init?.signal ?? undefined;
+      const abort = () => reject(new DOMException("The operation was aborted.", "AbortError"));
+      if (streamSignal?.aborted) abort(); else streamSignal?.addEventListener("abort", abort, { once: true });
+    }));
+    const api = new ContinuumApi("/api/v1");
+    const pending = api.streamRun("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", { onEvent: vi.fn() });
+
+    api.resetVaultReadScope();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(streamSignal?.aborted).toBe(true);
+  });
+
   it("does not expose a client operation that can renew the lifetime budget", () => {
     const api = new ContinuumApi("/api/v1");
     expect(api).not.toHaveProperty("budgetResetImpact");
     expect(api).not.toHaveProperty("resetBudgetCycle");
   });
 
+  it("clears browser-cached vault instructions at a whole-vault privacy boundary", () => {
+    localStorage.setItem("continuum.ui-settings", JSON.stringify({ systemInstructions: "private old-vault instructions" }));
+    new ContinuumApi("/api/v1").resetVaultSettingsCache();
+    expect(localStorage.getItem("continuum.ui-settings")).toBeNull();
+  });
+
   it("persists prompt tracing independently under the explicit promptTracing setting", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(json({ key: "promptTracing.enabled", value: true }));
+    const mutations = [{ key: "promptTracing.enabled", value: true }];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(json({ mutations, settings: { ...demoBootstrap.settings, promptTracingEnabled: true }, raw: { "promptTracing.enabled": true } }));
     const api = new ContinuumApi("/api/v1");
     await api.saveSettings({ promptTracingEnabled: true });
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<string, unknown>;
-    expect(body).toMatchObject({ key: "promptTracing.enabled", value: true });
-    expect(body.key).not.toBe("developer.traceMode");
+    expect(body).toMatchObject({ mutations });
+    expect(body).not.toHaveProperty("key");
     expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get("Idempotency-Key")).toBe(body.idempotencyKey);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/settings/batch");
   });
 
-  it("uses credentialed cookies and marks every setting mutation", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(json({ key: "memory.enabled", value: false }));
+  it("saves multiple settings atomically with one credentialed mutation", async () => {
+    const mutations = [{ key: "memory.enabled", value: false }, { key: "webSearch.enabled", value: false }];
+    const savedSettings = { ...demoBootstrap.settings, memoryPaused: true, webSearchEnabled: false };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(json({ mutations, settings: savedSettings, raw: { "memory.enabled": false, "webSearch.enabled": false } }));
     const api = new ContinuumApi("http://127.0.0.1:4317/api/v1");
-    await api.saveSettings({ memoryPaused: true });
+    await expect(api.saveSettings({ memoryPaused: true, webSearchEnabled: false })).resolves.toMatchObject(savedSettings);
+    expect(fetchMock).toHaveBeenCalledOnce();
     const [, options] = fetchMock.mock.calls[0]!;
     expect(options?.credentials).toBe("include");
     expect(new Headers(options?.headers).get("X-Continuum-Request")).toBe("1");
-    expect(JSON.parse(String(options?.body))).toMatchObject({ key: "memory.enabled", value: false });
+    const body = JSON.parse(String(options?.body)) as Record<string, unknown>;
+    expect(body).toMatchObject({ mutations });
+    expect(new Headers(options?.headers).get("Idempotency-Key")).toBe(body.idempotencyKey);
   });
 
   it("creates exports with a guarded POST before starting the local download", async () => {
@@ -245,40 +274,68 @@ describe("ContinuumApi security headers", () => {
 });
 
 describe("ContinuumApi live integration mapping", () => {
-  it("returns an explicit empty offline shell instead of fictional demo vault data", async () => {
+  it("rejects an unavailable bootstrap instead of substituting healthy empty vault data", async () => {
     localStorage.setItem("continuum.ui-settings", JSON.stringify({ theme: "dark" }));
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("connection refused"));
-    const result = await new ContinuumApi("http://127.0.0.1:4317/api/v1").bootstrap();
-    expect(result.runtime).toMatchObject({ mode: "offline", apiReachable: false });
-    expect(result.settings.theme).toBe("dark");
-    expect(result.events).toEqual([]);
-    expect(result.topics).toEqual([]);
-    expect(result.debug.trace).toBeNull();
+    await expect(new ContinuumApi("http://127.0.0.1:4317/api/v1").bootstrap()).rejects.toMatchObject({ code: "OFFLINE", retryable: true });
   });
 
   it("maps canonical bootstrap envelopes without leaking preview data into a connected vault", async () => {
     const event = { id: "11111111-1111-4111-8111-111111111111", sequence: 1, role: "user", kind: "message", status: "complete", content: "Live event", parentEventId: null, runId: null, active: true, createdAt: "2026-01-01T00:00:00.000Z", completedAt: "2026-01-01T00:00:00.000Z", attachments: [] };
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/health")) return json({ status: "ok", providerConfigured: true, worker: { queuedJobs: 0 }, database: { vectorMode: "bounded-cosine-fallback", schemaVersion: 7 }, version: "0.1.0" });
-      if (url.endsWith("/runtime")) return json({ mockProvider: false, vectorMode: "bounded-cosine-fallback" });
-      if (url.endsWith("/settings")) return json({ settings: { theme: "dark", quality: "deep", memoryPaused: true, webSearchEnabled: false, onboardingComplete: true }, raw: { "memory.enabled": false } });
-      if (url.endsWith("/budget")) return json({ hardLimitUsd: 100, spentUsd: 2.5, reservedUsd: 0.75, allocatedUsd: 3.25, availableUsd: 96.75, activeReservations: 2, inputTokens: 123, outputTokens: 45, extractionTokens: 67, embeddingTokens: 89, warningThresholdUsd: 75 });
-      if (url.includes("/events?")) return json({ events: [event], nextCursor: null });
-      if (url.includes("/topics?")) return json({ topics: [], nextCursor: null });
-      if (url.includes("/claims?")) return json({ claims: [], nextCursor: null });
-      if (url.includes("/graph?")) return json({ nodes: [], edges: [], focusId: null, truncated: false });
-      if (url.endsWith("/model-calls?limit=20")) return json({ calls: [] });
-      if (url.endsWith("/memory-jobs")) return json({ jobs: [] });
-      if (url.endsWith("/memories/lint")) return json({ issues: [] });
-      if (url.endsWith("/memories/pins")) return json({ pins: [] });
-      return json({ error: { message: "No trace yet" } }, 404);
-    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => bootstrapResponse(String(input), {
+      events: [event],
+      settings: { ...demoBootstrap.settings, theme: "dark", quality: "deep", memoryPaused: true, webSearchEnabled: false },
+      budget: { spentUsd: 2.5, reservedUsd: 0.75, allocatedUsd: 3.25, availableUsd: 96.75, activeReservations: 2, inputTokens: 123, outputTokens: 45, extractionTokens: 67, embeddingTokens: 89, warningThresholdUsd: 75 }
+    }));
     const result = await new ContinuumApi("http://127.0.0.1:4317/api/v1").bootstrap();
+    expect(result.vaultBoundary).toEqual({ generation: 1, maintenanceLocked: false, vaultId: "99999999-9999-4999-8999-999999999999" });
     expect(result.runtime).toMatchObject({ mode: "connected", apiReachable: true, providerReachable: true, vectorSearch: "fallback" });
     expect(result.settings).toMatchObject({ theme: "dark", quality: "deep", memoryPaused: true, webSearchEnabled: false });
     expect(result.events).toEqual([event]);
     expect(result.budget).toMatchObject({ totalUsd: 2.5, reservedUsd: 0.75, allocatedUsd: 3.25, availableUsd: 96.75, activeReservations: 2, capUsd: 100, inputTokens: 123, outputTokens: 45, extractionTokens: 67, embeddingTokens: 89, warningThresholdUsd: 75 });
+  });
+
+  it("fails closed on a malformed core 200 response", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => bootstrapResponse(String(input), { malformedRuntime: true }));
+    await expect(new ContinuumApi("/api/v1").bootstrap()).rejects.toMatchObject({ code: "BOOTSTRAP_INCOMPLETE", retryable: true });
+  });
+
+  it("fails closed while vault maintenance can expose a mixed replacement snapshot", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => bootstrapResponse(String(input), { maintenanceLocked: true }));
+    await expect(new ContinuumApi("/api/v1").bootstrap()).rejects.toMatchObject({ code: "MAINTENANCE_LOCKED", retryable: true, status: 423 });
+  });
+
+  it("rejects core reads when the server snapshot generation changes during bootstrap", async () => {
+    let boundaryReads = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      return bootstrapResponse(url, {
+        snapshotGeneration: url.endsWith("/vault/snapshot-boundary") ? ++boundaryReads : 1
+      });
+    });
+    await expect(new ContinuumApi("/api/v1").bootstrap()).rejects.toMatchObject({ code: "VAULT_SNAPSHOT_CHANGED", retryable: true, status: 409 });
+    expect(boundaryReads).toBe(2);
+  });
+
+  it("uses the latest overall run for durable failure recovery", async () => {
+    const failed = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      status: "failed",
+      quality: "balanced",
+      userEventId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      assistantEventId: null,
+      errorCode: "API_RESTARTED",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      completedAt: "2026-01-01T00:01:00.000Z"
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => bootstrapResponse(String(input), { latestRuns: [failed] }));
+    const result = await new ContinuumApi("/api/v1").bootstrap();
+    expect(result.latestFailedRun).toMatchObject({ id: failed.id, userEventId: failed.userEventId, assistantEventId: null, errorCode: "API_RESTARTED" });
+    expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual(expect.arrayContaining([
+      expect.stringContaining("/runs?status=active&limit=100"),
+      expect.stringContaining("/runs?limit=1")
+    ]));
+    expect(fetchMock.mock.calls.map((call) => String(call[0])).some((url) => url.includes("status=failed"))).toBe(false);
   });
 
   it("waits for attachment extraction before returning a message-safe ID", async () => {
@@ -496,4 +553,110 @@ afterEach(() => {
 
 function json(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), { status, headers: { "Content-Type": "application/json" } });
+}
+
+function bootstrapResponse(url: string, options: {
+  events?: unknown[];
+  latestRuns?: Array<Record<string, unknown>>;
+  activeRuns?: Array<Record<string, unknown>>;
+  settings?: typeof demoBootstrap.settings;
+  budget?: Partial<{
+    spentUsd: number;
+    reservedUsd: number;
+    allocatedUsd: number;
+    availableUsd: number;
+    activeReservations: number;
+    inputTokens: number;
+    outputTokens: number;
+    extractionTokens: number;
+    embeddingTokens: number;
+    warningThresholdUsd: number;
+  }>;
+  malformedRuntime?: boolean;
+  maintenanceLocked?: boolean;
+  snapshotGeneration?: number;
+} = {}) {
+  const settings = options.settings ?? demoBootstrap.settings;
+  if (url.endsWith("/health")) return json({
+    status: "ok",
+    providerConfigured: true,
+    worker: { status: "idle", queuedJobs: 0 },
+    database: {
+      integrity: "ok",
+      integrityCheckedAt: "2026-01-01T00:00:00.000Z",
+      schemaVersion: 18,
+      vectorAvailable: true,
+      vectorMode: "bounded-cosine-fallback",
+      vectorStrategy: "bounded-json-cosine",
+      vectorVersion: null,
+      vectorFallbackLimit: 5_000,
+      vectorLoadStatus: "degraded"
+    },
+    ingestion: {},
+    localOnly: true,
+    version: "0.1.0"
+  });
+  if (url.endsWith("/runtime")) return json(options.malformedRuntime ? {} : {
+    mode: "connected",
+    apiReachable: true,
+    providerReachable: true,
+    vectorSearch: "fallback",
+    vectorStrategy: "bounded-json-cosine",
+    vectorVersion: null,
+    vectorFallbackLimit: 5_000,
+    vectorLoadStatus: "degraded",
+    memoryQueue: "idle",
+    mockProvider: false,
+    vectorMode: "bounded-cosine-fallback"
+  });
+  if (url.endsWith("/vault/snapshot-boundary")) return json({
+    generation: options.snapshotGeneration ?? 1,
+    maintenanceLocked: options.maintenanceLocked ?? false,
+    vaultId: "99999999-9999-4999-8999-999999999999"
+  });
+  if (url.endsWith("/settings")) return json({ settings, raw: {
+    theme: settings.theme,
+    "quality.default": settings.quality,
+    "memory.enabled": !settings.memoryPaused,
+    "webSearch.enabled": settings.webSearchEnabled,
+    "onboarding.complete": settings.onboardingComplete,
+    "system.instructions": settings.systemInstructions,
+    "ui.showSourceChips": settings.showSourceChips,
+    "developer.traceMode": settings.developerOverrides,
+    "promptTracing.enabled": settings.promptTracingEnabled,
+    "models.response": settings.responseModelIds,
+    "models.extraction": settings.extractionModelId,
+    "models.embedding": settings.embeddingModelId,
+    "maintenance.locked": options.maintenanceLocked ?? false
+  } });
+  if (url.endsWith("/budget")) return json({
+    hardLimitUsd: 100,
+    capUsd: 100,
+    spentUsd: 0,
+    totalUsd: 0,
+    reservedUsd: 0,
+    allocatedUsd: 0,
+    availableUsd: 100,
+    activeReservations: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    extractionTokens: 0,
+    embeddingTokens: 0,
+    warningThresholdUsd: 20,
+    ledgerCreatedAt: null,
+    warningThresholdsReached: [],
+    ...options.budget
+  });
+  if (url.includes("/events?")) return json({ events: options.events ?? [], items: options.events ?? [], nextCursor: null });
+  if (url.includes("/runs?status=active")) return json({ runs: options.activeRuns ?? [], items: options.activeRuns ?? [], nextCursor: null });
+  if (url.includes("/runs?limit=1")) return json({ runs: options.latestRuns ?? [], items: options.latestRuns ?? [], nextCursor: null });
+  if (url.includes("/topics?")) return json({ topics: [], items: [], nextCursor: null });
+  if (url.includes("/claims?")) return json({ claims: [], items: [], nextCursor: null });
+  if (url.includes("/graph?")) return json({ nodes: [], edges: [], focusId: null, truncated: false });
+  if (url.endsWith("/model-calls?limit=20")) return json({ calls: [] });
+  if (url.endsWith("/memory-jobs")) return json({ jobs: [] });
+  if (url.endsWith("/memories/lint")) return json({ issues: [] });
+  if (url.endsWith("/memories/pins")) return json({ pins: [] });
+  if (url.includes("/memory-proposals?")) return json({ proposals: [] });
+  return json({ error: { message: "No trace yet" } }, 404);
 }

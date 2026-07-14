@@ -85,6 +85,24 @@ describe("ChatTimeline long-session windowing", () => {
     expect(screen.getByText(/preview unavailable/i)).toBeVisible();
   });
 
+  it("does not request persisted image bytes from a retained timeline while offline", () => {
+    const event = eventAt(0);
+    event.attachments = [{
+      id: "31111111-1111-4111-8111-111111111111",
+      sourceId: "32222222-2222-4222-8222-222222222222",
+      filename: "retained offline image.png",
+      mediaType: "image/png",
+      size: 4_096,
+      status: "ready",
+      createdAt: event.createdAt
+    }];
+
+    render(<ChatTimeline {...commonProps} offline events={[event]} highlightedEventId={null} />);
+
+    expect(screen.queryByRole("img", { name: event.attachments[0]!.filename })).not.toBeInTheDocument();
+    expect(screen.getByText(event.attachments[0]!.filename)).toBeVisible();
+  });
+
   it("keeps an interrupted answer visible with an explicit retry and graph action", () => {
     const retry = vi.fn();
     const showInGraph = vi.fn();

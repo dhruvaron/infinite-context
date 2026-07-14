@@ -12,6 +12,17 @@ const qualityOptions: Array<{ value: QualityPreset; label: string; detail: strin
   { value: "deep", label: "Deep", detail: "Complex research and reasoning", cost: "$$$" }
 ];
 
+export type ImportCommitDisposition = "precommit" | "rolled_back" | "committed_or_ambiguous";
+
+export function classifyImportCommitError(error: unknown): ImportCommitDisposition {
+  if (!(error instanceof ApiRequestError)) return "committed_or_ambiguous";
+  if (error.code === "VAULT_IMPORT_ROLLBACK_RECOVERY_REQUIRED") return "rolled_back";
+  if (["VERIFIED_IMPORT_CONSUMED", "VERIFIED_IMPORT_IN_USE", "VAULT_IMPORT_RECOVERY_REQUIRED"].includes(error.code)) {
+    return "committed_or_ambiguous";
+  }
+  return error.status >= 400 && error.status < 500 ? "precommit" : "committed_or_ambiguous";
+}
+
 export function SettingsDialog({ open, settings, runtime, budget, pinnedCount, onClose, onSave, onReset, onOpenMemory, onProviderChanged, onVaultReplaced }: {
   open: boolean;
   settings: AppSettings;
@@ -23,7 +34,7 @@ export function SettingsDialog({ open, settings, runtime, budget, pinnedCount, o
   onReset: () => void;
   onOpenMemory: () => void;
   onProviderChanged: () => Promise<void>;
-  onVaultReplaced: () => Promise<void>;
+  onVaultReplaced: (outcome?: "confirmed" | "ambiguous") => Promise<void>;
 }) {
   const [tab, setTab] = useState<SettingsTab>("general");
   const [draft, setDraft] = useState(settings);
@@ -46,13 +57,14 @@ export function SettingsDialog({ open, settings, runtime, budget, pinnedCount, o
   const [workspaceSaving, setWorkspaceSaving] = useState(false);
   const [workspaceRevoking, setWorkspaceRevoking] = useState<string | null>(null);
   const [promptTraceAcknowledged, setPromptTraceAcknowledged] = useState(settings.promptTracingEnabled);
-  const [importFile, setImportFile] = useState<File | null>(null);
-  const [verifiedImport, setVerifiedImport] = useState<{ token: string; expiresAt: string } | null>(null);
+  const [verifiedImport, setVerifiedImport] = useState<{ token: string; expiresAt: string; commitKeys: Record<"fresh" | "replace", string> } | null>(null);
   const [importStatus, setImportStatus] = useState<"idle" | "verifying" | "verified" | "importing" | "retry" | "failed">("idle");
   const [importMessage, setImportMessage] = useState<string | null>(null);
   const importInput = useRef<HTMLInputElement>(null);
   const wasOpen = useRef(false);
   const preview = runtime.mode === "demo";
+  const offline = runtime.mode === "offline";
+  const unavailable = preview || offline;
 
   useEffect(() => {
     const opening = open && !wasOpen.current;
@@ -61,14 +73,13 @@ export function SettingsDialog({ open, settings, runtime, budget, pinnedCount, o
     setDraft(settings);
     setPromptTraceAcknowledged(settings.promptTracingEnabled);
     setSaveError(null);
-    setImportFile(null);
     setVerifiedImport(null);
     setImportStatus("idle");
     setImportMessage(null);
   }, [open, settings]);
 
   useEffect(() => {
-    if (!open || tab !== "data" || preview) return;
+    if (!open || tab !== "data" || unavailable) return;
     let cancelled = false;
     setManagementLoading(true);
     setManagementError(null);
@@ -78,7 +89,7 @@ export function SettingsDialog({ open, settings, runtime, budget, pinnedCount, o
       if (!cancelled) setManagementError(error instanceof Error ? error.message : "Vault management data could not be loaded.");
     }).finally(() => { if (!cancelled) setManagementLoading(false); });
     return () => { cancelled = true; };
-  }, [open, preview, tab]);
+  }, [open, tab, unavailable]);
 
   const tabs: Array<{ value: SettingsTab; label: string; icon: typeof Settings2 }> = [
     { value: "general", label: "General", icon: Settings2 },
@@ -89,6 +100,7 @@ export function SettingsDialog({ open, settings, runtime, budget, pinnedCount, o
   ];
 
   const save = async () => {
+    if (offline) { setSaveError("Reconnect before changing vault settings."); return; }
     setSaving(true);
     setSaveError(null);
     try { await onSave(draft); onClose(); }
@@ -97,6 +109,7 @@ export function SettingsDialog({ open, settings, runtime, budget, pinnedCount, o
   };
 
   const saveApiKey = async () => {
+    if (unavailable) return;
     setKeyStatus("saving");
     try {
       await continuumApi.configureApiKey(apiKey.trim());
@@ -107,6 +120,7 @@ export function SettingsDialog({ open, settings, runtime, budget, pinnedCount, o
   };
 
   const removeApiKey = async () => {
+    if (unavailable) return;
     setKeyStatus("removing");
     try {
       await continuumApi.removeApiKey();
@@ -118,13 +132,14 @@ export function SettingsDialog({ open, settings, runtime, budget, pinnedCount, o
   };
 
   const runLint = async () => {
-    if (preview) return;
+    if (unavailable) return;
     setLintStatus("running");
     try { await continuumApi.runMemoryLint(); setLintStatus("queued"); }
     catch { setLintStatus("failed"); }
   };
 
   const createBackup = async () => {
+    if (unavailable) return;
     setBackupCreating(true);
     setManagementError(null);
     try { await continuumApi.createBackup(); setBackups(await continuumApi.listBackups()); }
@@ -133,6 +148,7 @@ export function SettingsDialog({ open, settings, runtime, budget, pinnedCount, o
   };
 
   const exportVault = async () => {
+    if (unavailable) return;
     setExportStatus("exporting");
     setExportMessage(null);
     try {
@@ -146,6 +162,7 @@ export function SettingsDialog({ open, settings, runtime, budget, pinnedCount, o
   };
 
   const authorizeWorkspace = async () => {
+    if (unavailable) return;
     const path = workspacePath.trim();
     if (!path) return;
     setWorkspaceSaving(true);
@@ -160,6 +177,7 @@ export function SettingsDialog({ open, settings, runtime, budget, pinnedCount, o
   };
 
   const revokeWorkspace = async (workspace: AuthorizedWorkspace) => {
+    if (unavailable) return;
     setWorkspaceRevoking(workspace.id);
     setManagementError(null);
     try {
@@ -171,13 +189,17 @@ export function SettingsDialog({ open, settings, runtime, budget, pinnedCount, o
   };
 
   const verifyImport = async (file: File) => {
-    setImportFile(file);
+    if (unavailable) return;
     setImportStatus("verifying");
     setImportMessage(null);
     try {
       const result = await continuumApi.verifyVaultImport(file);
       if (!result.valid) throw new Error("The bundle did not pass verification.");
-      setVerifiedImport({ token: result.verificationToken, expiresAt: result.expiresAt });
+      setVerifiedImport({
+        token: result.verificationToken,
+        expiresAt: result.expiresAt,
+        commitKeys: { fresh: crypto.randomUUID(), replace: crypto.randomUUID() }
+      });
       const eventCount = result.manifest?.counts?.events;
       setImportMessage(`Checksums and schema are valid${typeof eventCount === "number" ? ` · ${eventCount.toLocaleString()} events` : ""}. The verified local copy can be committed without uploading it again.`);
       setImportStatus("verified");
@@ -185,16 +207,38 @@ export function SettingsDialog({ open, settings, runtime, budget, pinnedCount, o
   };
 
   const importVerifiedVault = async (mode: "fresh" | "replace") => {
+    if (unavailable) return;
     if (!verifiedImport || (importStatus !== "verified" && importStatus !== "retry")) return;
     setImportStatus("importing");
+    let commitCompleted = false;
     try {
-      await continuumApi.commitVerifiedVaultImport(verifiedImport.token, mode);
-      await onVaultReplaced();
-      setImportFile(null);
+      await continuumApi.commitVerifiedVaultImport(verifiedImport.token, mode, verifiedImport.commitKeys[mode]);
+      commitCompleted = true;
+      await onVaultReplaced("confirmed");
       setVerifiedImport(null);
       setImportMessage(mode === "fresh" ? "Transcript imported and durable memory queued for a fresh rebuild. A safety backup was created first." : "Vault replaced exactly. A safety backup was created first.");
       setImportStatus("idle");
     } catch (error) {
+      if (commitCompleted) {
+        setVerifiedImport(null);
+        setImportMessage(error instanceof Error ? error.message : "Import committed, but the canonical view needs to reconnect.");
+        setImportStatus("failed");
+        return;
+      }
+      const disposition = classifyImportCommitError(error);
+      if (disposition === "committed_or_ambiguous") {
+        try { await onVaultReplaced("ambiguous"); } catch { /* The parent keeps the old vault scrubbed and read-only until reconnect succeeds. */ }
+        setVerifiedImport(null);
+        setImportMessage("Import committed or may have committed. The prior vault view was scrubbed; reconnect to load the canonical local state.");
+        setImportStatus("failed");
+        return;
+      }
+      if (disposition === "rolled_back") {
+        setVerifiedImport(null);
+        setImportMessage("The database replacement rolled back, but local cleanup must finish after restart. Your prior vault was not replaced; verify the file again after Continuum reconnects.");
+        setImportStatus("failed");
+        return;
+      }
       const retryableToken = error instanceof ApiRequestError && (error.retryable || ["MAINTENANCE_BUSY", "MAINTENANCE_LOCKED", "VERIFIED_IMPORT_IN_USE", "INSUFFICIENT_IMPORT_STORAGE", "VAULT_IMPORT_IO_RETRYABLE"].includes(error.code));
       if (!retryableToken) setVerifiedImport(null);
       setImportMessage(`${error instanceof Error ? error.message : "The vault could not be imported."} ${retryableToken ? `The verified local copy remains available until ${formatRelativeTime(verifiedImport.expiresAt)}; retry when maintenance finishes.` : "Verify the selected file again before retrying."}`);
@@ -204,10 +248,11 @@ export function SettingsDialog({ open, settings, runtime, budget, pinnedCount, o
 
   const modalBusy = saving || keyStatus === "saving" || keyStatus === "removing" || importStatus === "importing" || backupCreating || workspaceSaving || workspaceRevoking !== null;
 
-  return <Modal open={open} title="Settings" description="Local preferences, model access, memory controls, and vault management." width="large" dismissible={!modalBusy} onClose={onClose} footer={<><span className="modal-footer-status" role="status">{saveError}</span><button type="button" className="secondary-button" disabled={modalBusy} onClick={onClose}>Cancel</button><button type="button" className="primary-button" disabled={modalBusy} onClick={() => void save()}>{saving ? "Saving…" : "Save settings"}</button></>}>
+  return <Modal open={open} title="Settings" description="Local preferences, model access, memory controls, and vault management." width="large" dismissible={!modalBusy} onClose={onClose} footer={<><span className="modal-footer-status" role="status">{saveError}</span><button type="button" className="secondary-button" disabled={modalBusy} onClick={onClose}>Cancel</button><button type="button" className="primary-button" disabled={modalBusy || offline} onClick={() => void save()}>{saving ? "Saving…" : "Save settings"}</button></>}>
     <div className="settings-layout">
       <nav className="settings-nav" aria-label="Settings categories">{tabs.map(({ value, label, icon: Icon }) => <button type="button" key={value} className={tab === value ? "active" : ""} onClick={() => setTab(value)}><Icon size={16} />{label}</button>)}</nav>
       <div className="settings-content">
+        {offline && <div className="settings-notice"><AlertTriangle size={16} /><span>The last verified vault view is read-only. Reconnect before changing settings, credentials, workspaces, backups, imports, or local data.</span></div>}
         {tab === "general" && <SettingsSection title="Appearance" description="Continuum follows your system theme unless you choose otherwise.">
           <div className="theme-grid">{(["light", "dark", "system"] as ThemePreference[]).map((theme) => <button type="button" className={draft.theme === theme ? "selected" : ""} key={theme} onClick={() => setDraft((value) => ({ ...value, theme }))}>{theme === "light" ? <Sun size={18} /> : theme === "dark" ? <Moon size={18} /> : <Monitor size={18} />}<span>{theme}</span>{draft.theme === theme && <Check size={14} />}</button>)}</div>
           <label className="settings-field">Assistant instructions<textarea rows={5} value={draft.systemInstructions} onChange={(event) => setDraft((value) => ({ ...value, systemInstructions: event.target.value }))} /><small>Applied to response generation. Project-scoped instructions arrive with coding-agent scopes.</small></label>
@@ -218,7 +263,7 @@ export function SettingsDialog({ open, settings, runtime, budget, pinnedCount, o
           <SettingsSection title="Long-term memory" description="Pausing extraction never stops the raw transcript from being stored.">
             <Switch checked={!draft.memoryPaused} onChange={(checked) => setDraft((value) => ({ ...value, memoryPaused: !checked }))} label="Compile long-term memory" description="Extract durable facts, decisions, preferences, and relationships after each turn." />
             <div className="memory-policy-card"><ShieldCheck size={18} /><span><strong>Conservative promotion</strong><small>Continuum prefers missing a minor detail over polluting durable memory. Saying “remember this” overrides the threshold.</small></span></div>
-            <button type="button" className="wide-action" disabled={preview || lintStatus === "running"} onClick={() => void runLint()}><BrainCircuit size={16} /><span><strong>{lintStatus === "running" ? "Starting lint…" : lintStatus === "queued" ? "Memory lint queued" : "Run deep memory lint"}</strong><small>{lintStatus === "failed" ? "Could not start; try again." : "Find stale claims, conflicts, broken links, and duplicates."}</small></span></button>
+            <button type="button" className="wide-action" disabled={unavailable || lintStatus === "running"} onClick={() => void runLint()}><BrainCircuit size={16} /><span><strong>{lintStatus === "running" ? "Starting lint…" : lintStatus === "queued" ? "Memory lint queued" : "Run deep memory lint"}</strong><small>{lintStatus === "failed" ? "Could not start; try again." : "Find stale claims, conflicts, broken links, and duplicates."}</small></span></button>
           </SettingsSection>
           <SettingsSection title="Pinned context" description="Pinned items are always considered, but still respect the context budget."><div className="settings-info-row"><span>{pinnedCount} pinned {pinnedCount === 1 ? "memory" : "memories"}</span><button type="button" className="text-button" onClick={onOpenMemory}>Manage in inspector</button></div></SettingsSection>
         </>}
@@ -226,7 +271,7 @@ export function SettingsDialog({ open, settings, runtime, budget, pinnedCount, o
         {tab === "models" && <>
           <SettingsSection title="Response quality" description="Choose the default balance of speed, reasoning, and API cost."><div className="quality-settings">{qualityOptions.map((preset) => <button type="button" className={draft.quality === preset.value ? "selected" : ""} key={preset.value} onClick={() => setDraft((value) => ({ ...value, quality: preset.value }))}><span><strong>{preset.label}</strong><small>{preset.detail}</small></span><em>{preset.cost}</em>{draft.quality === preset.value && <Check size={14} />}</button>)}</div></SettingsSection>
           <SettingsSection title="OpenAI connection" description="The key is stored in macOS Keychain and never returned to the browser.">
-            <div className="key-settings-row"><input aria-label="OpenAI API key" type="password" value={apiKey} onChange={(event) => { setApiKey(event.target.value); setKeyStatus("idle"); }} placeholder="Replace API key…" autoComplete="off" /><button type="button" className="secondary-button" disabled={preview || apiKey.trim().length < 20 || keyStatus === "saving" || keyStatus === "removing"} onClick={() => void saveApiKey()}>{keyStatus === "saving" ? "Saving…" : "Save to Keychain"}</button>{runtime.providerReachable && <button type="button" className="danger-button" disabled={preview || keyStatus === "saving" || keyStatus === "removing"} onClick={() => void removeApiKey()}>{keyStatus === "removing" ? "Removing…" : "Remove saved key"}</button>}</div>
+            <div className="key-settings-row"><input aria-label="OpenAI API key" type="password" disabled={unavailable} value={apiKey} onChange={(event) => { setApiKey(event.target.value); setKeyStatus("idle"); }} placeholder="Replace API key…" autoComplete="off" /><button type="button" className="secondary-button" disabled={unavailable || apiKey.trim().length < 20 || keyStatus === "saving" || keyStatus === "removing"} onClick={() => void saveApiKey()}>{keyStatus === "saving" ? "Saving…" : "Save to Keychain"}</button>{runtime.providerReachable && <button type="button" className="danger-button" disabled={unavailable || keyStatus === "saving" || keyStatus === "removing"} onClick={() => void removeApiKey()}>{keyStatus === "removing" ? "Removing…" : "Remove saved key"}</button>}</div>
             {keyStatus === "saved" && <p className="success-copy" role="status"><Check size={14} /> Key updated securely.</p>}{keyStatus === "removed" && <p className="success-copy" role="status"><Check size={14} /> Key removed from Keychain. Local browsing remains available.</p>}{keyStatus === "failed" && <p className="error-copy" role="alert"><AlertTriangle size={14} /> Keychain access could not be updated.</p>}
             <div className="budget-settings"><div><span>Development and evaluation budget</span><strong>${budget.allocatedUsd.toFixed(2)} allocated <small>/ ${budget.capUsd.toFixed(0)}</small></strong></div><div className="budget-meter"><span style={{ width: `${Math.min(100, budget.capUsd ? budget.allocatedUsd / budget.capUsd * 100 : 100)}%` }} /></div><p>${budget.totalUsd.toFixed(2)} spent · ${budget.reservedUsd.toFixed(2)} reserved across {budget.activeReservations} active {budget.activeReservations === 1 ? "call" : "calls"} · ${budget.availableUsd.toFixed(2)} available.</p><p>Warnings at $20, $50, $75, and $90. Nonessential runs stop at $95; all calls stop at $100.</p></div>
             <div className="budget-lifetime-notice"><ShieldCheck size={16} /><span><strong>One non-renewable $100 lifetime cap</strong><small>Application chat and evaluation share this installation-wide total. Vault deletion, replacement, import, or reinstalling a source checkout cannot reset earlier recorded spend.</small></span></div>
@@ -237,21 +282,21 @@ export function SettingsDialog({ open, settings, runtime, budget, pinnedCount, o
           {preview && <div className="settings-notice"><ShieldCheck size={16} /><span>Vault management is disabled in the temporary preview. Leave preview to manage your personal data.</span></div>}
           <SettingsSection title="Portable vault" description="Exports are versioned, checksummed, and contain no API key or embeddings.">
             <div className="export-options"><label><input type="checkbox" checked={exportAttachments} onChange={(event) => setExportAttachments(event.target.checked)} /> Include original attachments</label><label><input type="checkbox" checked={exportTools} onChange={(event) => setExportTools(event.target.checked)} /> Include sensitive tool output</label></div>
-            <div className="action-grid"><button type="button" disabled={preview || exportStatus === "exporting"} onClick={() => void exportVault()}><Download size={17} /><span><strong>{exportStatus === "exporting" ? "Preparing export…" : "Export vault"}</strong><small>ZIP with JSONL, JSON, Markdown, and checksums</small></span></button><button type="button" disabled={preview || importStatus === "verifying" || importStatus === "importing"} onClick={() => importInput.current?.click()}><Upload size={17} /><span><strong>{importStatus === "verifying" ? "Verifying…" : importStatus === "importing" ? "Importing…" : "Import vault"}</strong><small>Verify before changing any local data</small></span></button></div>
-            <input ref={importInput} className="visually-hidden" type="file" accept=".zip,application/zip" onChange={(event) => { const file = event.target.files?.[0]; if (file) void verifyImport(file); event.target.value = ""; }} />
+            <div className="action-grid"><button type="button" disabled={unavailable || exportStatus === "exporting"} onClick={() => void exportVault()}><Download size={17} /><span><strong>{exportStatus === "exporting" ? "Preparing export…" : "Export vault"}</strong><small>ZIP with JSONL, JSON, Markdown, and checksums</small></span></button><button type="button" disabled={unavailable || importStatus === "verifying" || importStatus === "importing"} onClick={() => importInput.current?.click()}><Upload size={17} /><span><strong>{importStatus === "verifying" ? "Verifying…" : importStatus === "importing" ? "Importing…" : "Import vault"}</strong><small>Verify before changing any local data</small></span></button></div>
+            <input ref={importInput} className="visually-hidden" type="file" aria-label="Choose vault import file" accept=".zip,application/zip" onChange={(event) => { const file = event.target.files?.[0]; if (file) void verifyImport(file); event.target.value = ""; }} />
             {exportMessage && <div className={`import-status status-${exportStatus}`} role="status"><span>{exportMessage}</span></div>}
-            {importMessage && <div className={`import-status status-${importStatus}`} role="status"><span>{importMessage}</span>{(importStatus === "verified" || importStatus === "retry") && <div className="import-actions"><button type="button" className="secondary-button" onClick={() => void importVerifiedVault("fresh")}>Import transcript, rebuild memory</button><button type="button" className="danger-button" onClick={() => void importVerifiedVault("replace")}>{importStatus === "retry" ? "Retry exact replacement" : "Replace with exact vault"}</button></div>}</div>}
+            {importMessage && <div className={`import-status status-${importStatus}`} role="status"><span>{importMessage}</span>{(importStatus === "verified" || importStatus === "retry") && <div className="import-actions"><button type="button" className="secondary-button" disabled={unavailable} onClick={() => void importVerifiedVault("fresh")}>Import transcript, rebuild memory</button><button type="button" className="danger-button" disabled={unavailable} onClick={() => void importVerifiedVault("replace")}>{importStatus === "retry" ? "Retry exact replacement" : "Replace with exact vault"}</button></div>}</div>}
           </SettingsSection>
           <SettingsSection title="Backups" description="Seven daily and four weekly local snapshots are managed automatically.">
-            <div className="settings-info-row"><span><Archive size={15} />{managementLoading ? "Loading backups…" : backups[0] ? `Last backup ${formatRelativeTime(backups[0].createdAt)}` : "No managed backup yet"}</span><button type="button" className="text-button" disabled={preview || backupCreating} onClick={() => void createBackup()}>{backupCreating ? "Creating…" : "Create backup now"}</button></div>
+            <div className="settings-info-row"><span><Archive size={15} />{managementLoading ? "Loading backups…" : backups[0] ? `Last backup ${formatRelativeTime(backups[0].createdAt)}` : "No managed backup yet"}</span><button type="button" className="text-button" disabled={unavailable || backupCreating} onClick={() => void createBackup()}>{backupCreating ? "Creating…" : "Create backup now"}</button></div>
             {backups.length > 0 && <div className="management-list">{backups.slice(0, 4).map((backup) => <span key={backup.id}><strong>{backup.kind}</strong><small>{formatBytes(backup.size)} · {formatRelativeTime(backup.createdAt)}</small></span>)}</div>}
           </SettingsSection>
           <SettingsSection title="Authorized workspaces" description="V1 reads only local roots you explicitly authorize and never writes to them.">
-            <div className="workspace-form"><label>Absolute folder path<input value={workspacePath} disabled={preview} onChange={(event) => setWorkspacePath(event.target.value)} placeholder="/Users/you/Projects/example" /></label><label>Display name <small>(optional)</small><input value={workspaceName} disabled={preview} onChange={(event) => setWorkspaceName(event.target.value)} placeholder="Example project" /></label><button type="button" className="secondary-button" disabled={preview || !workspacePath.trim() || workspaceSaving} onClick={() => void authorizeWorkspace()}><Plus size={14} />{workspaceSaving ? "Authorizing…" : "Authorize read-only"}</button></div>
-            {workspaces.length > 0 && <div className="management-list workspace-management-list">{workspaces.map((workspace) => <div className="workspace-management-card" key={workspace.id}><div className="management-row"><span><strong><FolderOpen size={13} />{workspace.displayName}</strong><small>{workspace.path} · read-only · likely-secret files denied by default</small></span><button type="button" className="icon-button" aria-label={`Revoke access to ${workspace.displayName}`} disabled={workspaceRevoking === workspace.id} onClick={() => void revokeWorkspace(workspace)}>{workspaceRevoking === workspace.id ? <span className="loading-ring" /> : <Trash2 size={14} />}</button></div><WorkspaceSecretApprovalForm workspace={workspace} disabled={preview} /></div>)}</div>}
+            <div className="workspace-form"><label>Absolute folder path<input value={workspacePath} disabled={unavailable} onChange={(event) => setWorkspacePath(event.target.value)} placeholder="/Users/you/Projects/example" /></label><label>Display name <small>(optional)</small><input value={workspaceName} disabled={unavailable} onChange={(event) => setWorkspaceName(event.target.value)} placeholder="Example project" /></label><button type="button" className="secondary-button" disabled={unavailable || !workspacePath.trim() || workspaceSaving} onClick={() => void authorizeWorkspace()}><Plus size={14} />{workspaceSaving ? "Authorizing…" : "Authorize read-only"}</button></div>
+            {workspaces.length > 0 && <div className="management-list workspace-management-list">{workspaces.map((workspace) => <div className="workspace-management-card" key={workspace.id}><div className="management-row"><span><strong><FolderOpen size={13} />{workspace.displayName}</strong><small>{workspace.path} · read-only · likely-secret files denied by default</small></span><button type="button" className="icon-button" aria-label={`Revoke access to ${workspace.displayName}`} disabled={unavailable || workspaceRevoking === workspace.id} onClick={() => void revokeWorkspace(workspace)}>{workspaceRevoking === workspace.id ? <span className="loading-ring" /> : <Trash2 size={14} />}</button></div><WorkspaceSecretApprovalForm workspace={workspace} disabled={unavailable} /></div>)}</div>}
             {managementError && <p className="error-copy"><AlertTriangle size={14} /> {managementError}</p>}
           </SettingsSection>
-          <div className="danger-zone"><div><AlertTriangle size={18} /><span><strong>Destroy this vault</strong><small>Permanently delete the timeline, wiki, graph, attachments, and managed backups.</small></span></div><button type="button" className="danger-button" onClick={onReset}>{preview ? "Clear preview…" : "Start over…"}</button></div>
+          <div className="danger-zone"><div><AlertTriangle size={18} /><span><strong>Destroy this vault</strong><small>Permanently delete the timeline, wiki, graph, attachments, and managed backups.</small></span></div><button type="button" className="danger-button" disabled={offline} onClick={onReset}>{preview ? "Clear preview…" : "Start over…"}</button></div>
         </>}
 
         {tab === "developer" && <>
@@ -285,7 +330,7 @@ function WorkspaceSecretApprovalForm({ workspace, disabled }: { workspace: Autho
   const path = relativePath.trim();
   const unsafePath = path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) || path.split(/[\\/]+/).some((segment) => segment === "..");
   const grant = async () => {
-    if (!path || unsafePath || !acknowledged) return;
+    if (disabled || !path || unsafePath || !acknowledged) return;
     setStatus("granting");
     setError(null);
     try {
